@@ -330,14 +330,17 @@ The larger the drop on day $t_i$, the higher the hazard on that day
 
 
 # 5. MCMC sampler
+Questions:
+- Should I use a Uniform or a Gamma;log(normal) distribution for $\lambda_h$ ?
+- What $\lambda_h$ initialization value should I take ? 
 
+we take a $\lambda_h$ initialization value of 0.02 .
+We used Uniform(0,1) as prior for $\lambda_h$, similar to the prior used by Cauchemez et al. and Tsang et al.  
+The SD of the Gaussian random-walk proposal 
 Three update components per iteration (Metropolis-within-Gibbs; data augmentation following Cauchemez et al. 2004):
 
-1.  **MH for** $q$ — random-walk on $\log(q)$; Beta(1, 19) prior (mean 0.05)
+1.  **MH for** $\lambda_h$ — random-walk on $\lambda_h$ ; Uniform(0,1)
 2.  **Gibbs for** ${T_{hk},Y_{hk}}$ 
-
-initialization:\
-Variable Starting value $Y_{hk}^{(0)}$ $\text{Bernoulli}(0.2)$ — so each missing member starts infected with 20% probability $T_{hk}^{(0)}$ $\text{Uniform}{1, \ldots, 14}$ if $Y_{hk}^{(0)} = 1$, else NA $q^{(0)}$ 0.02
 
 # Example for one household
 
@@ -356,7 +359,7 @@ Missing 2 (M2): unknown.
 The sampler draws random starting values:
 
 - $\lambda_h$    = 0.02   ($\lambda_h$ init)
-- M1:  Y = 1,  T = 7    (Y ~ Bernoulli(0.3), T ~ Uniform{1..14})
+- M1:  Y = 1,  T = 7    (Y, T drawn jointly from `prior_miss_simple`: Y ~ Bernoulli(1 − escape prior), T ~ prior T-weights)
 - M2:  Y = 0,  T = NA
 
 ## Iteration 1, Step 1 - MH update for $\lambda_h$
@@ -373,56 +376,30 @@ It computes the likelihood twice — once with $\lambda_h$=0.02, once with $\lam
 - ...
 - day 14: contact B survived all hazards → contributes E(14)
 
-The day loop described (day 1… day 5 contact A… day 14 contact B) is the inner loop inside "compute_escape_seq_simple". The likelihood is computed twice via "total_loglik_timed_simple" function — once for current $\lambda_h$, once for $\lambda_h$*. 
+The day loop described (day 1… day 5 contact A… day 14 contact B) is the inner loop inside "compute_escape_seq_simple". The likelihood is computed twice via "total_loglik_timed_simple" function — once for current $\lambda_h$, once for $\lambda_h$*.
 
-## Iteration 1, Step 2 - Gibbs for Y_hk
+## Iteration 1, Step 2 - Joint Gibbs for (Y_hk, T_hk)
 '''
 
 For M1 (currently Y=1, T=7):
 
 Build enrolled infectors: contact A infected on day 5.
 
-Compute prior (index + community + contact A as infector of M1).
-(using the function "prior_miss_simple", that uses "compute_escape_seq_simple").
-E_prior(14) : probability M1 escaped infection through day 14.
+Compute the prior (using the function "prior_miss_simple", that uses "compute_escape_seq_simple") — index + community + contact A as infector of M1.
 
-Compute the log likelihood for both states (using function "hh_loglik_timed_simple"):
-ll(Y_M1=0): ("Given M1 is absent from the infector list, how well does that explain what we observed in contacts A and B?" ): M1 absent from infector list → contact B faces less hazard → slightly higher chance B escaped
-ll(Y_M1=1, T=7): M1 infectious from day 7 → adds hazard to B on days 7–14
+Evaluate "hh_loglik_timed_simple" for all 15 candidate states in one pass: Y=0 ("M1 never infected"), and Y=1 with T=1, 2, ..., 14. Each state's score is household log-likelihood + log(prior weight for that state) — pm$Y0 for the Y=0 state, pm$T_probs[t] for each Y=1,T=t state:
+ll(Y_M1=0): M1 absent from infector list → contact B faces less hazard → slightly higher chance B escaped
+ll(Y_M1=1, T=t): M1 infectious from day t → adds hazard to B on days t–14
 
-Compute posterior: P(Y_M1=1) = softmax(ll1 + log(E_prior(6) - E_prior(7)), ll0 + log(E_prior(14))).
-
- Softmax convert log-scores to a probability.
-Then we sample from that probability, using a weighted coin: Y_M1 = 1 with probability p1, Y_M1 = 0 with probability 1 − p1.
-Sample: say Y_M1 stays 1.
+Normalise all 15 scores with log-sum-exp into a single categorical distribution and sample one state directly — there is no separate Y-then-T step.
+Sample: state Y=1, T=6 is drawn (M1 moves from T=7 to T=6, staying infected).
 
 For M2 (currently Y=0, T=NA):
 
-Same enrolled infectors. T_prop drawn from prior since T is currently NA — say T_prop = 4.
-
-Evaluate:
-
-ll(Y_M2=0): current state unchanged
-ll(Y_M2=1, T=4): M2 infectious from day 4 → adds substantial hazard to B on days 4–14, but B was not infected — this makes the data less likely
-Posterior pulls toward Y_M2=0. Sample: M2 stays 0.
+Same enrolled infectors and prior. Evaluate the same 15-way joint state (Y=0; Y=1, T=1..14): any Y=1,T=t state would add hazard to B on days t–14, but B was not infected, so those states score lower than Y=0.
+Sample: M2 stays Y=0, T=NA.
 
 '''
-
-## Iteration 1, Step 3 - Gibbs for T_hk
-
-For M1 (Y=1, T=7): enumerate all 14 candidate days.
-
-The sampler evaluates hh_loglik_timed_simple 14 times (for (t_try in seq_len(T_follow))) :
-
-t=1:  M1 infectious very early → adds a lot of hazard to B for 14 days → B surviving is unlikely → low posterior weight
-t=4:  M1 infectious from day 4 → B still survived → modest weight
-t=7:  current value — B survived days 7-14 with M1 infectious → decent weight
-t=10: M1 infectious very late → little additional hazard to B → higher weight
-Also weighted by the prior T_probs (from the infectivity profile — day 3–5 most likely given index exposure).
-
-Normalise and sample: say T_M1 moves from 7 to 6.
-
-For M2: skip (Y=0).
 
 ## Iteration 1, Priors updated
 
@@ -432,12 +409,12 @@ M2:  Y = 0,  T = NA
 
 The MH step for $\lambda_h$ requires all households before deciding to accept or reject $\lambda_h$*. This is a common prior. So for each iteration we go through all households, compute the likelihood contributions, and then accept/reject $\lambda_h$*.
 
-The Gibb steps are independent across households( Each household's latent variables are updated based on the current $\lambda_h$ and the observed data for that household), so it could be updated in parallel.
+The Gibbs step is independent across households( Each household's latent variables are updated based on the current $\lambda_h$ and the observed data for that household), so it could be updated in parallel.
 
-## After 10,000 iterations
+## After 20,000 iterations
 
-The chain has visited thousands of combinations. 
-We burn 2000 (20%) to not be biased toward the starting value.
+The chain has visited thousands of combinations.
+We burn 5,000 (25%) to not be biased toward the starting value.
 The posterior gives you:
 
 Distribution of $\lambda_h$ → median + 95% CrI for $\lambda_h$
@@ -456,7 +433,8 @@ Corrected SAR = (1 + 0.4) / (2 + 2) = 35% with a credible interval
 N_ITER   <- 20000
 N_BURNIN <- 5000
 N_THIN   <- 10
-Q_SD <- 0.12
+LAMBDA_H_INIT <- 0.02
+LAMBDA_H_SD <- 0.015
 
 # Fixed biological parameters (Omicron)
 T_FOLLOW <- 14   # observation window (days)
@@ -482,7 +460,8 @@ if (file.exists(cache_file)) {
                          n_iter   = N_ITER,
                          n_burnin = N_BURNIN,
                          n_thin   = N_THIN,
-                         q_sd = Q_SD,
+                         q_init = LAMBDA_H_INIT,
+                         q_sd = LAMBDA_H_SD,
                          f_prof   = f_prof,
                          p_bg     = P_BG,
                          T_follow = T_FOLLOW)
