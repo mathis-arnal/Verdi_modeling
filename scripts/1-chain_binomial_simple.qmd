@@ -1,0 +1,668 @@
+---
+title: "Chain-binomial model — age-homogeneous baseline"
+format: 
+  html: default
+  pdf: default
+editor: visual
+knitr:
+  opts_knit:
+    root.dir: ".."
+---
+
+# Overview
+
+A discrete-time chain-binomial model for household SARS-CoV-2 transmission. This is the **baseline model**: all contacts are treated as homogeneous (no contact matrix, no age stratification). Age-stratified transmission will be examined as a sensitivity analysis in `chain_binomial_mcmc.qmd`.
+
+The aim is to correct the **household SAR ** by including missing members. At the moment, I don't have any source attribution variables.
+
+The model includes:
+
+-   **Infection timing** — observed contacts' `timetoinf` values enter the likelihood; secondary-to-secondary chains within households are modelled explicitly
+-   **Latent variables for missing members**: infection indicator $Y_{hk}$ and infection day $T_{hk}$ — updated via exact Gibbs steps within a single MCMC chain (data augmentation following Cauchemez et al. 2004)
+-   **Background community hazard** $p_\text{bg}$ from phylogenetic analysis (12/40 community-acquired contacts over \~21 days)
+
+
+**Note on** $\tau$: `timetoinf` is measured from enrollment, not from the index case's first infectious day. The index started being infectious $\tau$ days before enrollment. Primary analysis uses $\tau = 2$ (Omicron: \~1 day presymptomatic + \~1 day to detection).
+
+------------------------------------------------------------------------
+
+
+# Patterns of enrollment
+
+![Enrollment pattern over the study period (July 2022 – May 2024).](../fig/pattern_of_enrollment.png){fig-align="center" width="80%"}
+
+This are the 4 patterns of enrollment at origin. In modeling study, we only consider the Full participation household and the declined participation cases. (The one highlighted in red). If there was a positive contact case at entry, we exclude it, as there is more than one index at baseline.
+
+
+# Our data
+let's have a look at the contact cases that were positive at enrollment. When filter, We end up with 80 households.
+
+
+```{r}
+#| include: false
+
+library(dplyr)
+library(ggplot2)
+
+source("R/model_functions_simple.R")
+
+set.seed(2024)
+
+
+pcr_result <- read.csv("/mnt/d/VERDI/metadata/res/pre_process/raw_data/pcr_result.csv")
+pcr_pos_day1 <- pcr_result %>%
+  mutate(index = as.integer(endsWith(pid, "1")),
+         hhid  = as.integer(substr(pid, 3, 5))) %>%
+  filter(visit == "Day1", result == "Detected", valid==1, index==0) %>%
+  select(pid, hhid)
+
+#print(pcr_pos_day1)
+#'''15 contacts were positive at enrollement, from 14 households. We need to exclude this families from the #analysis, because we cannot know if the secondary cases were infected by the index case or by the contact who #was already positive at enrollment. '''
+```
+
+```{r}
+#| include: false
+
+TAU      <- 2    # index pre-enrollment infectious days; sensitivity: 1, 3
+
+dataset <- read.csv("/mnt/e/VERDI_modeling/data/dataset_freezed2Nov25.csv") %>%
+  mutate(
+    infected_bin = as.integer(result_infected == "Detected")
+  ) %>%
+  group_by(hhid) %>%
+  mutate(exclude_mem = exclude_mem[index == 1][1]) %>%
+  ungroup()
+
+hh_list <- build_hh_list_simple(dataset, tau = TAU)
+
+n_obs_contacts  <- sum(sapply(hh_list, function(h) nrow(h$contacts)))
+n_obs_infected <- sum(sapply(hh_list, function(h) sum(h$contacts$infected_bin)))
+n_total_missing <- sum(sapply(hh_list, function(h) h$n_missing))  
+
+dataset_filtered <- dataset %>%
+  filter(!(hhid %in% pcr_pos_day1$hhid)) 
+
+hh_list_f <- build_hh_list_simple(dataset_filtered, tau = TAU)
+
+n_obs_contacts_f  <- sum(sapply(hh_list_f, function(h) nrow(h$contacts)))
+n_obs_infected_f  <- sum(sapply(hh_list_f, function(h) sum(h$contacts$infected_bin)))
+n_total_missing_f <- sum(sapply(hh_list_f, function(h) h$n_missing))
+
+
+```
+
+```{r}
+#| echo: false
+comparison <- data.frame(
+  Metric = c("Households", "Observed contacts", "Observed infected",
+             "Raw SAR (%)", "Missing members"),
+  Before = c(length(hh_list),
+             n_obs_contacts,
+             n_obs_infected,
+             sprintf("%.1f", 100 * n_obs_infected / n_obs_contacts),
+             n_total_missing),
+  After  = c(length(hh_list_f),
+             n_obs_contacts_f,
+             n_obs_infected_f,
+             sprintf("%.1f", 100 * n_obs_infected_f / n_obs_contacts_f),
+             n_total_missing_f)
+)
+
+knitr::kable(comparison,
+             col.names = c("", "All households", "PCR-negative at entry"),
+             caption   = "Effect of excluding households with a contact PCR-positive at enrollment.")
+rm(hh_list)
+rm(dataset)             
+```
+
+------------------------------------------------------------------------
+
+# The variables we have 
+
+Contacts self-administered an antigen RDT (Flowflex ATK) every other day for 14 days. When the ATK was positive, the study team visited the household and collected a nasopharyngeal swab for RT-PCR on the same day as the positive ATK. the varable **timetoinf** records the day of first positive ATK, with PCR confirmation on that same day.
+
+# Person-to-person hazard of infection in the household
+
+
+ In the model, the hazard of infection of individual j at time t from an infected household 
+member i, with infection time ti
+ in household k, was
+λi→j 
+(t) = λh
+Xβ
+k 
+∗ exp(δi
+) ∗ f (t − ti
+)
+ 
+where  λh  was the baseline hazard,  δi  was the relative individual infectiousness of cases, which 
+followed a normal distribution with mean 0 and SD  σvar  .
+Xk  was the number of household contacts.  β  was the parameter describing the relationship 
+between number of household contacts and transmission rate. It ranged from 0 to 1, with 0 indicating 
+that the transmission rate is independent of number of household contacts while 1 indicates that 
+the transmission rate is inversely proportional to number of household contacts (i.e. dilution effect 
+of the contact time per contact which is lower when the number of household contacts is higher). 
+f(·) was the infectiousness profile since infection generated from the assumed incubation period 
+(mean equal to 5 days) and infectious period (mean equal to 13) (He et al., 2020; Jing et al., 2020; 
+Li et al., 2020b)
+
+
+In this first model, we assume that there are no individual differences in susceptibility or infectiousness, and that all household members have the same rates of contact with each other (homogeneous mixing). So we consider β and δi equal to 1.
+
+## 1. Serial Interval (Omicron Gamma) 
+- List of questions :
+Is the distribution of time between two consecutive PCR positive dates  an operational proxy for the serial interval ?
+- Should I use the genomic data to get the index strain, and choose an appropriate serial interval according to the strain for each household ?
+
+We need to compute the infectiousness profile. 
+
+- In Tsang et al. (2023),  the infectiousness profile since infection is generated from the assumed incubation period (mean 
+equal to 5 days) and infectious period (mean equal to 13) (He et al., 2020; Jing et al., 2020; Li et al., 
+2020a; Appendix 1—table 15).
+
+The real issue for us is that **timetoinf** is the ATK detection day of the contact, not the transmission day (followed by a PCR confirmation the same day). The distribution of time between two consecutive PCR positive dates is an operational proxy for the serial interval (Please correct me if I am wrong). Cauchemez and al 2009 uses the serial interval in the hazard of infection model. As prior, I will use the probabilistic density of the serial interval.
+
+
+
+- Take a prior from bibliography: In our case, we have the time betwen index infection and contact infection with the variable timetoinf. So we can use the generation time as as proxy for the infectiousness profile.
+  
+At the moment, I use the Serial Interval from  bibliography (an der Heiden et al, 2022), based on 11 512 household clusters during the Omicron Period in Germany. We model the temporal infectiousness profile $f(s)$ as a discretized Gamma distribution 
+
+-   For the **index case** at follow-up day $t$: infectious day = $\tau + t$, so weight = $f(\tau + t)$.
+
+-   For a **secondary infector** infected on day $t_j$: on day $t$ they are at infectious day $t - t_j + 1$, so weight = $f(t - t_j + 1)$.
+
+
+```{r}
+#| echo: false
+
+
+
+shape  <- 2.11
+rate   <- 0.50
+
+D_max  <- 14
+f_raw  <- diff(pgamma(0:D_max, shape = shape, rate = rate))
+f_prof <- f_raw / sum(f_raw)
+
+plot((1:D_max) - 0.5, f_prof, type = "h",
+     xlab = "Days since infection", ylab = "Relative infectiousness",
+     main = "Omicron serial interval (Gamma, shape = 2.11, rate = 0.50)",
+     lwd = 2, col = "steelblue",
+     xlim = c(0, D_max), ylim = c(0, max(f_prof) * 1.1))
+x_seq <- seq(0, D_max, length.out = 500)
+y_seq <- dgamma(x_seq, shape = shape, rate = rate) / sum(f_raw)
+lines(x_seq, y_seq, col = "#E63946", lwd = 2)
+legend("topright",
+       legend = c("Daily probability mass f(t)", "Continuous Gamma density"),
+       col = c("steelblue", "#E63946"), lwd = c(2, 2), bty = "n", cex = 0.9)
+```
+
+
+## Our Person-to-person hazard of infection
+
+In this first model, we consider homogeneous mixing, so we simplify the equation from Tsang et al, to go to this : 
+
+|  |
+|:---|
+|  |
+| The hazard that an infectious household member $i$ (with infection day $t_i$) transmits to a susceptible member $j$ on study day $t$ is: |
+| $$\lambda_{i \to j}(t) = \lambda_h \cdot f(t - t_i + 1)$$ |
+| where: |
+| \- $\lambda_h$ is the **baseline household transmission rate** — hazard of infection from an infected household member (Tsang et al., 2023), interpreted as the per-contact-per-day probability of infection. - $f(\cdot)$ is the **infectivity profile** — a discretised Gamma distribution ($\mu = 3.3$ days, $\sigma = 1.5$ days) describing how the infectiousness of member $i$ varies over time since their own infection. It is normalised so that $\sum_s f(s) = 1$, ensuring that $\lambda_h$ retains its interpretation as a probability. |
+
+
+## How to handle missing household members?
+
+Non-enrolled ("missing") household members are treated as latent variables — we never observe them, but we impute their infection status probabilistically within the MCMC.  `n_missing = exclude_mem` gives their count per household.
+Because we do not model age here, the prior is the same for all missing members in a given household.
+
+For every $k$ missing members in household $h$, we assign two latents variables : $Y_{hk}$ and $T_{hk}$. 
+
+If missing member $k$ has $Y_{hk} = 1$ (infected), then at follow-up day $t$ they contribute hazard to every other susceptible in the household.
+
+$T_{hk}$ is the unobserved detection day. Assigning $T_{hk}$ is also important, because a missing member who was infected can themselves infect another susceptible household member {i}, with the hazard $\lambda_h \cdot f(t - T_{hk} + 1)$: 
+
+$\lambda_i(t) \ni \lambda_h \cdot f(t - T_{hk} + 1)$
+
+
+#### How to initialize $T_{hk}$ ?
+Questions:
+- As a prior, should I use a Omicron serial interval distribution, or the observed distribution from the infection enrolled contacts ? 
+
+We can use the existing timetoinf form infected enrolled contacts as a prior for the missing time to infection of the missing members.
+```{r}
+#| echo: false
+#| fig-cap: "Distribution of observed infection times (timetoinf) among infected enrolled contacts."
+
+library(ggplot2)
+timetoinf_obs <- unlist(lapply(hh_list_f, function(h) {
+  h$contacts$timetoinf[h$contacts$infected_bin == 1L & !is.na(h$contacts$timetoinf)]
+}))
+
+ggplot(data.frame(t = timetoinf_obs), aes(x = t)) +
+  geom_histogram(binwidth = 1, fill = "#457B9D", alpha = 0.85, colour = "white") +
+  scale_x_continuous(breaks = 1:14) +
+  labs(x = "Days from enrollment to first positive PCR (timetoinf)",
+       y = "Count",
+       title = "Observed infection timing among enrolled contacts") +
+  theme_minimal(base_size = 13)
+```
+
+#### How to initialize $Y_{hk}$ ?
+Questions:
+- Should I choose the observed SAR as prior ?
+- Should I choose a bigger prior to help the chain explore the space ?
+
+Each missing member starts infected with 20%, which is around the observed SAR: $Y_{hk}^{(0)}$ $\text{Bernoulli}(0.2)$
+
+#### Gibbs steps for $Y_{hk}$ and $T_{hk}$
+
+$Y_{hk}$ and $T_{hk}$ are updated **jointly** with 0ne Gibbs Step. 
+
+For each missing member, we  enumerate all 15 ($T_\text{follow} + 1$) mutually exclusive states : "not infected", or "infected on day $t$" for every $t = 1, \ldots, T_\text{follow}$.  Each state is scored  by its household log-likelihood (`hh_loglik_timed_simple`) plus its log-prior weight from `prior_miss_simple`. A single state  $(Y_{hk}, T_{hk})$is drawn from the resulting categorical distribution of the 15 states. 
+
+
+# 3 Transmission model
+
+
+Each susceptible contact faces a **daily hazard** from four sources:
+
+1. The **index case** — weighted by $f(\tau + t)$
+2. **Enrolled contacts** who tested positive on day $t_j$ — weighted by $f(t - t_j + 1)$
+3. **Missing members** with latent infection day $T_{hk}$ — weighted by $f(t - T_{hk} + 1)$
+4. **Community background** $\lambda_c$ ( $-log( 1 - p_\text{bg})$  day, $p_\text{bg}$: 0.003/day)
+
+In this model, A missing member with $Y_{hk} = 1$ and $T_{hk} = 5$ contributes exactly the same hazard as an enrolled contact who tested positive on day 5.
+
+The daily force of infection on susceptible $i$ at day $t$ is:
+
+|  |
+|:---|
+| $$\lambda_i(t) = \lambda_c
+               + \lambda_h\, f(\tau + t)
+               + \sum_{j:\,\text{infector}} \lambda_h\, f(t - t_j + 1)$$ 
+
+
+# What are all the transmission chains modelled?
+
+| Direction | Modelled? | Where |
+|---|---|---|
+| Index → enrolled contact | Yes | likelihood |
+| Index → missing member | Yes | prior  |
+| Enrolled contact → enrolled contact | Yes | likelihood  |
+| Enrolled contact → missing member | Yes | prior  |
+| Missing member → enrolled contact | Yes | likelihood  |
+| Missing member → missing member | No | second-order; not implemented |
+
+# Inference
+
+
+## Likelihood — timed chain-binomial
+
+The Likelihood function is similar to the one used in Tsang et Al, 2023 and Cauchemez et al., 2009.
+
+The cumulative escape probability for susceptible $i$ through day $t_i$ is:
+$$E_i(t_i) = \exp\!\left(-\sum_{t=1}^{t_i} \lambda_i(t)\right)$$
+
+The probability that household member $i$ has PCR detected on day $t_i$ is the probability of not getting PCR detected until day $t_i-1$, then getting PCR detected on day $t_i$.  : 
+$$P(y_i = 1, t = t_{i}) = (1-E_i(t_i)) \times E_i(t_i - 1) =  \left[1 - \exp(-\lambda_i(t_{i}))\right] \times \exp\left(-\sum_{t=1}^{t_{i}-1} \lambda_i(t)\right)$$
+
+
+For a contact infected on day $t_i$, Two things must have happened:
+
+1. They survived days 1 through $t_i - 1$ (not infected before day $t_i$).
+2. They did NOT survive day $t_i$  (infected on exactly day $t_i$).
+So the probability of a contact being infected on day $t_i$: 
+$$\mathcal{L}_i = P(\text{survived through day } t_i - 1) - P(\text{survived through day } t_i)$$
+
+$$= E_i(t_i - 1) - E_i(t_i)$$
+
+This is the **discrete probability mass** of being infected on exactly day $t_i$.
+
+
+- If infected on day 4:  L_i = E_i(3) - E_i(4) = 0.79 - 0.71 = 0.08
+- If not infected:       L_i = E_i(14).
+The larger the drop on day $t_i$, the higher the hazard on that day
+
+
+------------------------------------------------------------------------
+
+
+# 5. MCMC sampler
+
+Three update components per iteration (Metropolis-within-Gibbs; data augmentation following Cauchemez et al. 2004):
+
+1.  **MH for** $q$ — random-walk on $\log(q)$; Beta(1, 19) prior (mean 0.05)
+2.  **Gibbs for** ${T_{hk},Y_{hk}}$ 
+
+initialization:\
+Variable Starting value $Y_{hk}^{(0)}$ $\text{Bernoulli}(0.2)$ — so each missing member starts infected with 20% probability $T_{hk}^{(0)}$ $\text{Uniform}{1, \ldots, 14}$ if $Y_{hk}^{(0)} = 1$, else NA $q^{(0)}$ 0.02
+
+# Example for one household
+
+## Setup
+
+```
+Index:     infectious since τ=2 days before enrollment.
+Contact A: infected, timetoinf = 5.
+Contact B: not infected.
+Missing 1 (M1): unknown.
+Missing 2 (M2): unknown.
+```
+
+## Initial state (iteration 0)
+
+The sampler draws random starting values:
+
+- $\lambda_h$    = 0.02   ($\lambda_h$ init)
+- M1:  Y = 1,  T = 7    (Y ~ Bernoulli(0.3), T ~ Uniform{1..14})
+- M2:  Y = 0,  T = NA
+
+## Iteration 1, Step 1 - MH update for $\lambda_h$
+
+The sampler proposes a new value: $\lambda_h^*$ = 0.023
+
+It computes the likelihood twice — once with $\lambda_h$=0.02, once with $\lambda_h^*$=0.023 — using the current latent state (M1 infected day 7, M2 not infected). The day loop runs inside each call:
+- day 1: index infectious (f(τ+1) = f(3)), M1 infectious (f(1-7+1)<0 → 0)
+- day 2: index (f(4)), M1 not yet infectious
+- ...
+- day 5: contact A gets infected — contributes E(4)-E(5) to likelihood
+- ...
+- day 7: M1 starts being infectious
+- ...
+- day 14: contact B survived all hazards → contributes E(14)
+
+The day loop described (day 1… day 5 contact A… day 14 contact B) is the inner loop inside "compute_escape_seq_simple". The likelihood is computed twice via "total_loglik_timed_simple" function — once for current $\lambda_h$, once for $\lambda_h$*. 
+
+## Iteration 1, Step 2 - Gibbs for Y_hk
+'''
+
+For M1 (currently Y=1, T=7):
+
+Build enrolled infectors: contact A infected on day 5.
+
+Compute prior (index + community + contact A as infector of M1).
+(using the function "prior_miss_simple", that uses "compute_escape_seq_simple").
+E_prior(14) : probability M1 escaped infection through day 14.
+
+Compute the log likelihood for both states (using function "hh_loglik_timed_simple"):
+ll(Y_M1=0): ("Given M1 is absent from the infector list, how well does that explain what we observed in contacts A and B?" ): M1 absent from infector list → contact B faces less hazard → slightly higher chance B escaped
+ll(Y_M1=1, T=7): M1 infectious from day 7 → adds hazard to B on days 7–14
+
+Compute posterior: P(Y_M1=1) = softmax(ll1 + log(E_prior(6) - E_prior(7)), ll0 + log(E_prior(14))).
+
+ Softmax convert log-scores to a probability.
+Then we sample from that probability, using a weighted coin: Y_M1 = 1 with probability p1, Y_M1 = 0 with probability 1 − p1.
+Sample: say Y_M1 stays 1.
+
+For M2 (currently Y=0, T=NA):
+
+Same enrolled infectors. T_prop drawn from prior since T is currently NA — say T_prop = 4.
+
+Evaluate:
+
+ll(Y_M2=0): current state unchanged
+ll(Y_M2=1, T=4): M2 infectious from day 4 → adds substantial hazard to B on days 4–14, but B was not infected — this makes the data less likely
+Posterior pulls toward Y_M2=0. Sample: M2 stays 0.
+
+'''
+
+## Iteration 1, Step 3 - Gibbs for T_hk
+
+For M1 (Y=1, T=7): enumerate all 14 candidate days.
+
+The sampler evaluates hh_loglik_timed_simple 14 times (for (t_try in seq_len(T_follow))) :
+
+t=1:  M1 infectious very early → adds a lot of hazard to B for 14 days → B surviving is unlikely → low posterior weight
+t=4:  M1 infectious from day 4 → B still survived → modest weight
+t=7:  current value — B survived days 7-14 with M1 infectious → decent weight
+t=10: M1 infectious very late → little additional hazard to B → higher weight
+Also weighted by the prior T_probs (from the infectivity profile — day 3–5 most likely given index exposure).
+
+Normalise and sample: say T_M1 moves from 7 to 6.
+
+For M2: skip (Y=0).
+
+## Iteration 1, Priors updated
+
+$\lambda_h$    = 0.023
+M1:  Y = 1,  T = 6
+M2:  Y = 0,  T = NA
+
+The MH step for $\lambda_h$ requires all households before deciding to accept or reject $\lambda_h$*. This is a common prior. So for each iteration we go through all households, compute the likelihood contributions, and then accept/reject $\lambda_h$*.
+
+The Gibb steps are independent across households( Each household's latent variables are updated based on the current $\lambda_h$ and the observed data for that household), so it could be updated in parallel.
+
+## After 10,000 iterations
+
+The chain has visited thousands of combinations. 
+We burn 2000 (20%) to not be biased toward the starting value.
+The posterior gives you:
+
+Distribution of $\lambda_h$ → median + 95% CrI for $\lambda_h$
+Distribution of Σ Y_hk → on average, say 0.4 of the 2 missing members were infected per draw
+Corrected SAR = (1 + 0.4) / (2 + 2) = 35% with a credible interval
+
+
+# MCMC sampler
+
+## Setup
+```{r}
+#| output: false
+
+
+# MCMC settings
+N_ITER   <- 20000
+N_BURNIN <- 5000
+N_THIN   <- 10
+Q_SD <- 0.12
+
+# Fixed biological parameters (Omicron)
+T_FOLLOW <- 14   # observation window (days)
+TAU      <- 2    # index pre-enrollment infectious days; sensitivity: 1, 3
+
+# Background daily community acquisition probability
+# From phylogenetic analysis: 12/40 community-acquired over ~21 days
+P_BG <- 0.003
+
+```
+
+
+## Run MCMC
+```{r}
+
+cache_file <- "results/mcmc_simple.rds"
+
+if (file.exists(cache_file)) {
+  res <- readRDS(cache_file)
+  cat("Loaded cached results.\n")
+} else {
+  res <- run_mcmc_simple(hh_list_f,
+                         n_iter   = N_ITER,
+                         n_burnin = N_BURNIN,
+                         n_thin   = N_THIN,
+                         q_sd = Q_SD,
+                         f_prof   = f_prof,
+                         p_bg     = P_BG,
+                         T_follow = T_FOLLOW)
+  saveRDS(res, cache_file)
+}
+
+all_q     <- res$q_chain
+all_E_inf <- res$E_miss_infected
+
+```
+
+##  Results
+
+### Posterior of $\lambda_h$
+
+```{r}
+q_summary <- data.frame(
+  median = median(all_q),
+  lower  = quantile(all_q, 0.025),
+  upper  = quantile(all_q, 0.975)
+)
+
+cat(sprintf("lambda_h: median = %.4f  (95%% CrI: %.4f – %.4f)\n",
+            q_summary$median, q_summary$lower, q_summary$upper))
+
+ggplot(data.frame(q = all_q), aes(x = q)) +
+  geom_histogram(bins = 60, fill = "#457B9D", alpha = 0.85) +
+  geom_vline(xintercept = q_summary$median, colour = "#E63946", linewidth = 0.8) +
+  labs(title = "Posterior distribution of lambda_h (age-homogeneous model)",
+       x = "lambda_h (per-contact-per-day transmission probability)", y = "Count") +
+  theme_minimal(base_size = 13)
+```
+
+## Corrected SAR
+
+```{r}
+sar_corrected <- (n_obs_infected + all_E_inf) /
+                 (n_obs_contacts  + n_total_missing)
+sar_obs <- n_obs_infected / n_obs_contacts
+
+sar_summary <- data.frame(
+  Analysis = c("Published GEE (Khamduang et al. 2026)",
+               "Observed enrolled only",
+               "Corrected (age-homogeneous chain-binomial)"),
+  SAR_pct  = c(23.5,
+               round(sar_obs * 100, 1),
+               round(median(sar_corrected) * 100, 1)),
+  Lower    = c(NA_real_,
+               round((sar_obs - 1.96 * sqrt(sar_obs * (1 - sar_obs) /
+                                              n_obs_contacts)) * 100, 1),
+               round(quantile(sar_corrected, 0.025) * 100, 1)),
+  Upper    = c(NA_real_,
+               round((sar_obs + 1.96 * sqrt(sar_obs * (1 - sar_obs) /
+                                              n_obs_contacts)) * 100, 1),
+               round(quantile(sar_corrected, 0.975) * 100, 1))
+)
+
+knitr::kable(sar_summary,
+             col.names = c("Analysis", "SAR (%)", "95% lower", "95% upper"),
+             caption   = "Individual-level SAR estimates.")
+```
+
+```{r}
+ggplot(data.frame(sar = sar_corrected * 100), aes(x = sar)) +
+  geom_histogram(bins = 50, fill = "#457B9D", alpha = 0.85) +
+  geom_vline(xintercept = sar_obs * 100,
+             colour = "#E63946", linetype = "dashed", linewidth = 0.8) +
+  geom_vline(xintercept = median(sar_corrected) * 100,
+             colour = "#2a9d8f", linewidth = 0.8) +
+  annotate("text", x = sar_obs * 100, y = Inf, vjust = 2, hjust = -0.1,
+           label = sprintf("Observed %.1f%%", sar_obs * 100),
+           colour = "#E63946", size = 3.5) +
+  annotate("text", x = median(sar_corrected) * 100, y = Inf, vjust = 2, hjust = 1.1,
+           label = sprintf("Corrected %.1f%%", median(sar_corrected) * 100),
+           colour = "#2a9d8f", size = 3.5) +
+  labs(title    = "Posterior distribution of corrected SAR (age-homogeneous model)",
+       subtitle = "Uncertainty from joint posterior of (q, Y_hk, T_hk)",
+       x = "Individual-level SAR (%)", y = "Count") +
+  theme_minimal(base_size = 13)
+```
+
+## Expected infections among missing members
+
+```{r}
+cat(sprintf(
+  "Expected infections among %d missing members: %.1f  (95%% CrI: %.1f – %.1f)\n",
+  n_total_missing,
+  median(all_E_inf),
+  quantile(all_E_inf, 0.025),
+  quantile(all_E_inf, 0.975)
+))
+```
+
+------------------------------------------------------------------------
+
+# 8. Convergence diagnostics
+
+```{r}
+#| echo: false
+plot(all_q, type = "l", col = "#457B9D",
+     xlab = "Iteration (post-burnin)", ylab = "q",
+     main = "Trace plot — q (age-homogeneous model)")
+
+cat(sprintf("lambda_h — median: %.3f  95%% CrI: [%.3f, %.3f]\n",
+  median(all_q),
+  quantile(all_q, 0.025),
+  quantile(all_q, 0.975)))
+
+
+n_eff <- function(x) {
+  n  <- length(x)
+  ac <- acf(x, lag.max = 100, plot = FALSE)$acf[-1]
+  n / (1 + 2 * sum(ac[ac > 0.05]))
+}
+cat(sprintf("ESS — q: %.0f\n", n_eff(all_q)))
+```
+
+
+# Sensitivity analysis: hypergeometric
+
+```{r}
+#| include: false
+library("chainbinomial")
+source("R/hyperchainbinom.R")
+dcbhyper(x=0:4, s0 = 5, prob = 0.25, s0_obs = 4, i0 = 1)
+
+estimate_sar_cbhyper(infected= 1, s0 = 5, s0_obs = 4, i0 = 1, se = TRUE)
+```
+
+Let's try on all our households. The `estimate_sar_cbhyper` function takes vectors of observed infections, total household size, observed household size, and initial infectors, and returns the estimated SAR with confidence intervals.
+i0 is the number of initial infectors (index case) in each household. In our dataset, it is always 1.
+
+```{r}
+hyper_sar <- estimate_sar_cbhyper(
+  infected = sapply(hh_list_f, function(h) sum(h$contacts$infected_bin)),
+  s0       = sapply(hh_list_f, function(h) nrow(h$contacts) + h$n_missing),
+  s0_obs   = sapply(hh_list_f, function(h) nrow(h$contacts)),
+  i0       = 1
+)
+print(hyper_sar$sar_hat)
+confint.sar2(hyper_sar)
+```
+
+dcbhyper (16.2%) et notre MCMC (14.1%, via 1−exp(−0.152)) donnent des estimés proches.
+
+
+# Results
+
+As results, we found $\lambda_h$ — median: 0.152  95% CrI: [0.101, 0.211]
+We have only 44 secondary cases, they are not contraining $\lambda_h$ a lot.
+What it means: probabilité de 15.2% par contact par jour qu'un membre infectieux transmette au contact susceptible — à l'apogée de l'infectiosité (f(t) = 1). En pratique, le risque quotidien est pondéré par f(t).
+
+
+
+
+------------------------------------------------------------------------
+
+
+
+# 5. Sensitivity analysis: take age of contacts into account
+
+- **Consider the household contact heterogeneity**:  Uses the Prem et al. (2021) Thai home contact matrix to weight the per-contact-per-day transmission probability $q$ by the age of the infector and infectee. the age-stratified version  multiplies each $q$ term by $C_{a_i, a_j}$ from the Thai home contact matrix (Prem et al. 2021).
+
+- **Consider the community contact heterogeneity**: Take into account the community based on the age (Different ages have not the same number of contacts)
+
+
+# Other possible analysis:
+
+# 6. Run MCMC
+
+
+------------------------------------------------------------------------
+
+# Model assumptions and limitations
+
+| Assumption | Impact if violated |
+|----|----|
+| $\tau = 2$ days (index pre-enrollment infectious period) | Shifts timing window for index→contact transmission; sensitivity at $\tau \in \{1, 3\}$ |
+| Homogeneous $q$ — no age-stratified contact rates | Underestimates child–adult differential; age-stratified model with Prem et al. (2021) matrix is the primary analysis |
+| Single $q$ — no viral load (Ct) modifier | Absorbs infectiousness heterogeneity into $q$; planned extension |
+| Single $q$ — no IgG susceptibility modifier | MCAR refusal mechanism (venipuncture fear) makes correction unnecessary |
+| Fixed $p_\text{bg} = 0.003$/day | Community hazard varied over 2022–2024; sensitivity warranted |
+| MCAR missingness | If refusal correlates with infection status, corrected SAR is biased |
