@@ -1,0 +1,1036 @@
+---
+title: "Correcting for Missing Household Members in SAR Estimation"
+subtitle: "A Timed Chain-Binomial Model"
+author: "VERDI-RECOVER Modeling Team"
+date: "12 June 2026"
+format:
+  beamer:
+    theme: Madrid
+    colortheme: beaver
+    aspectratio: 169
+    slide-level: 2
+    toc: false
+    section-titles: false
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{xcolor}
+  - \usepackage{pifont}
+  - \setbeamertemplate{navigation symbols}{}
+  - \AtBeginSection{}
+  - \definecolor{myblue}{RGB}{30,90,160}
+  - \definecolor{myred}{RGB}{180,40,40}
+  - \definecolor{mygreen}{RGB}{30,130,80}
+---
+
+# Part 1 — Context and Problem
+
+## VERDI-RECOVER: Study Context
+
+**Prospective household SARS-CoV-2 transmission study — Chiang Mai, Thailand**
+
+- July 2022 – May 2024 (Omicron wave: BA.2, BA.4/5, XBB)
+- Households with confirmed index case (PCR/antigen within 48 h), $\geq 2$ members, $\geq 1$ child
+- 14-day follow-up with PCR every other day; **no mandatory quarantine**
+
+\medskip
+
+:::: {.columns}
+::: {.column width="52%"}
+
+| | $n$ |
+|---|---:|
+| Households | 93 |
+| Index cases | 93 (48 children, 45 adults) |
+| Enrolled contacts | 197 |
+| Secondary infections | 44 |
+| **Observed SAR** | **23.5%** |
+
+:::
+::: {.column width="44%"}
+
+**Findings (published GEE analysis):**
+
+- Baseline IgG positivity: aRR 0.45 (−55% risk)
+- No significant SAR difference by index age
+
+\medskip
+
+**Limitation:**
+
+- 37% of household members not enrolled
+
+:::
+::::
+
+
+## The Missing Data Problem
+
+
+**Why members were excluded:**
+
+- 117 refused consent — mainly **fear of venipuncture**
+- 18 PCR-positive at day 1 (co-primary cases, excluded) => Should we take them off the study ? 
+
+\medskip
+
+**Exclusion mechanism:** fear of venipuncture ? We assume MCAR
+
+\medskip
+
+**Published check:** SAR in complete vs.\ incomplete households:
+28.6% vs.\ 36.2% ($p = 0.45$)
+
+
+
+# Part 2 — Existing Literature
+
+
+## Cauchemez et al. (2009): 1.1 — Person-to-Person Hazard
+
+The hazard that member $i$ (onset day $d_i$) infects member $j$ (onset day $d > d_i$):
+
+$$P^H_{i \to j}(d) = \underbrace{g(n)}_{\text{HH size}} \cdot \underbrace{\mu_\text{inf}(a_i, s_i)}_{\text{infectivity of }i} \cdot \underbrace{\mu_\text{sus}(a_j)}_{\text{susceptibility of }j} \cdot \underbrace{f(d - d_i)}_{\text{serial interval}}$$
+
+\medskip
+
+\footnotesize
+
+| Component | Definition |
+|---|---|
+| $g(n)$ | Household-size correction — one $\beta_n$ per size (baseline non-parametric); parametric alternatives tested | 
+| $\mu_\text{inf}(a_i, s_i)$ | Relative infectivity of infector $i$; may depend on age $a_i$ and symptoms $s_i$ |
+| $\mu_\text{sus}(a_j)$ | Relative susceptibility of contact $j$ by age | 
+| $f(d - d_i)$ | Serial interval density — discretized Weibull, minimum lag $L=1$ day |
+
+\normalsize
+
+\medskip
+
+
+
+## Cauchemez et al. (2009): 1.2 — Community Risk
+
+**§1.2 — Community risk of infection**
+
+The daily hazard of acquiring infection from outside the household is **constant** for all members throughout follow-up:
+
+$$P^C_j(d) = \alpha$$
+
+Sensitivity analyses tested: age-specific community risk (children vs.\ adults), and exponential growth $\alpha(d) = \alpha_0 \exp\{r(d-d_0)\}$. Neither improved fit significantly ($p = 0.89$ and $p = 0.33$ respectively). A single scalar $\alpha$ is sufficient.
+
+\medskip
+
+## Cauchemez et al. (2009): 1.3 — Total Hazard
+
+**§1.3 — Total hazard of symptom onset for member $j$ on day $d$**
+
+$$\lambda_j(d) = \sum_{\substack{i=1,\ldots,n \\ i \neq j}} P^H_{i \to j}(d) \;+\; P^C_j(d)$$
+
+The sum runs over **all** household members with onset before day $d$ — not only the index case. Tertiary infections (contact infecting another contact) enter naturally.
+
+\medskip
+
+
+## Cauchemez et al. (2009): Daily Escape Probability
+
+**Why does escaping infection on day $d$ have probability $e^{-\lambda_j(d)}$?**
+
+\medskip
+
+
+**The Poisson process assumption**
+
+Within a single day $d$, infectious contacts capable of infecting $j$ arrive as a **Poisson process** with rate $\lambda_j(d)$. One contact is sufficient to cause infection.
+
+From the Poisson PMF, the probability of receiving **zero** contacts in one day is:
+
+$$P(X = 0) = \frac{e^{-\lambda_j(d)}\,\lambda_j(d)^0}{0!} = e^{-\lambda_j(d)}$$
+
+This is the **daily escape probability**.
+
+
+## Cauchemez et al. (2009): Additive Hazards
+
+
+**Why hazards are additive**
+
+Independent Poisson processes (community, index, secondary infectors) **sum** to a single Poisson process:
+
+$$\lambda_j(d) = \underbrace{\alpha}_{\text{community}} + \underbrace{\lambda_\text{idx} \to j}_{\text{index}} + \underbrace{\sum_{k \in \mathcal{I}(d)} \lambda_{k \to j}}_{\text{other infectors}}$$
+
+The escape from **all** sources simultaneously factorises:
+
+$$P(\text{escape all}) = e^{-\lambda_\text{total}} = e^{-\alpha} \cdot e^{-\lambda_\text{idx}} \cdot \prod_k e^{-\lambda_{k\to j}}$$
+
+**Cumulative escape** — probability of remaining susceptible through day $t$:
+
+$$E_j(0) = 1, \qquad E_j(t) = E_j(t-1)\cdot e^{-\lambda_j(t)}$$
+
+
+## Cauchemez et al. (2009): 2.2 — Priors
+
+- **Relative susceptibility / infectivity** $\mu$: $\log(\mu) \sim \mathcal{N}(0, 3)$ — , symmetric around 1
+- **Community hazard** $\alpha$: flat 
+- **Household-size correction** $g(n)$: flat 
+- **Serial interval** (Weibull): soft constraint — $< 20\%$ of transmissions after day 14
+
+
+
+# Part 3 — Our Model
+
+## {.plain}
+
+\vfill
+\begin{center}
+{\Huge \textbf{Part 3}}\\[1em]
+{\LARGE Our Model}
+\end{center}
+\vfill
+
+
+## Study Design Constraint
+
+**Temporal Constraints**
+
+- **48 h enrollment criterion** — we never know exactly when the index was infected, only that they tested positive $\leq$ 48 h before enrollment
+- **$T_\text{follow} = 14$ days** — fixed follow-up window; infections after day 14 are unobserved
+- **PCR every other day** — `timetoinf` is interval-censored; true infection day is $\approx t_\text{inf} - 1$ to $t_\text{inf}$; no daily resolution
+
+\medskip
+
+**Observational Constraints (missing members)**
+
+- **Infection status unknown** — we never observe whether a non-enrolled member was infected
+- **Age unknown** — only household size is recorded; no age or sex for refusers $\Rightarrow$ imputed from MICS6 Chiang Mai donor pool
+
+
+## The Enrollment Criterion and $\tau$
+
+:::: {.columns}
+::: {.column width="52%"}
+
+**From infection to enrollment**
+
+\footnotesize
+
+| Day | Event |
+|---|---|
+| 0 | Index infected |
+| $\approx$2 | \textbf{Shedding starts} — virus detectable, pre-symptomatic |
+| $\approx$3 | Symptoms + positive test |
+| $\leq$ 5 | \textbf{Enrollment} (protocol: $\leq$ 48 h after test) |
+
+\normalsize
+
+\medskip
+
+$$\tau = \text{enrollment day} - \text{shedding start} \approx 2\text{ days}$$
+
+:::
+::: {.column width="44%"}
+
+**What $\tau$ means for the model**
+
+By day 1 of follow-up, the index has **already been infectious for $\tau$ days** — household members were exposed before we started observing.
+
+\medskip
+
+The 48 h protocol constrains $\tau$:
+
+- $\tau = 0$: impossible — index must shed before testing positive
+- $\tau \geq 4$: ruled out by the 48 h rule
+
+$$\tau \in \{1,\, 2,\, 3\}$$
+
+\textcolor{myblue}{\textbf{Primary: $\tau = 2$; sensitivity at $\{1, 3\}$}}
+
+:::
+::::
+
+## Age Prior: UNICEF MICS6 2022 Thailand
+
+:::: {.columns}
+::: {.column width="50%"}
+
+**What is MICS6?**
+
+UNICEF **Multiple Indicator Cluster Survey** , nationally representative household survey, Thailand 2022.
+
+\medskip
+
+- Covers all provinces; we filter to **Chiang Mai** (`HH7A = 50`)
+- around 1,600 Chiang Mai households retained after filtering
+
+\medskip
+
+**Why use it?**
+
+We need a prior on the age of non-enrolled members. MICS6 Chiang Mai provides a realistic distribution of household age composition for the same population and year as the VERDI study.
+
+Filtered to households with $\geq 2$ members and $\geq 1$ child — matching VERDI enrollment criteria.
+
+:::
+::::
+
+
+## Age Prior: MICS6 Hot-Deck (Should we add a Sex Prior ?)
+
+**Problem:** age of missing members is unobserved. We cannot use complete households as priors, because the distribution of HH size of complete VS incomplete are really different.
+
+**Solution:** UNICEF MICS6 2022 Thailand, filtered to **Chiang Mai** ($\text{HH7A} = 50$).
+
+\medskip
+
+**Procedure for household $h$:**
+
+1. Observe enrolled members' age composition $(n_C^\text{obs},\, n_A^\text{obs},\, n_E^\text{obs})$
+2. Match to MICS6 donor households with same total size and $n_a^{(d)} \geq n_a^\text{obs}$ for each age $a$
+3. Compute expected extra members per age group:
+$$\pi_a^{(h)} \propto \sum_d w_d \cdot \max\!\bigl(0,\, n_a^{(d)} - n_a^\text{obs}\bigr)$$
+4. Get the Marginal prior $(\pi_C, \pi_A, \pi_E)$ for each missing member in $h$ from the donor pool.
+
+If no donors match: fall back to $(\pi_C, \pi_A, \pi_E) = (?, ?, ?)$.
+
+## Contact Matrix: Prem Matrices?
+
+**What we use**
+
+Prem et al. (2021) **synthetic home contact matrix** for Thailand, aggregated from 16 × 16 five-year bands to $3 \times 3$ (Child, Adult, Elderly):
+
+$$C_{a_i,\, a_j} = \text{mean contacts/day},\quad a \in \{\text{Child, Adult, Elderly}\}$$
+
+**Why Prem?**
+
+Thailand has no empirical within-household contact survey (From what I know). Prem et al. (2021) is the only available option: a Bayesian hierarchical projection from POLYMOD + Thai demographic proxies (DHS, ILO, UNESCO).
+
+\medskip
+
+## Contact Matrix: How to use the contact matrix?
+
+
+**Standard practice**
+
+Li et al. (2026) ("Constructing Contact and Connectivity Matrices for Infectious
+Disease Modelling"): treating $C$ as fixed and estimating a scalar transmission probability is the dominant approach.
+
+$$c_{ij} = q \cdot \tilde{c}_{ij}$$
+
+ In our model, we consider $q$ as a scalar transmission probability, as a prior.
+
+**Acknowledged gap**
+
+Prem provides 200 bootstrap draws per country; we use the point estimate. Li et al. (2026) recommends propagating this sampling uncertainty.
+
+
+## Our Model: Daily Force of Infection
+
+Daily force of infection on susceptible $i$ at day $t$ — **four additive sources:**
+
+$$\lambda_i(t) \;=\; \lambda_\text{bg} \;+\; \lambda_\text{idx}(t) \;+\; \lambda_\text{enrolled}(t) \;+\; \lambda_\text{missing}(t)$$
+
+\medskip
+
+| Source | Active during | Hazard |
+|---|---|---|
+| (1) Community background | Every day | $-\log(1 - p_\text{bg})$ |
+| (2) Index case | Days $1, \ldots, D - \tau$ | $q \cdot C_{a_i,\, a_\text{idx}}$ |
+| (3) Infected enrolled contact $j$ | Days $t_j, \ldots, t_j + D - 1$ | $q \cdot C_{a_i,\, a_j}$ |
+| (4) Infected missing member $k$ | Days $T_{hk}, \ldots, T_{hk} + D - 1$ | $q \cdot C_{a_i,\, a_k}$ |
+
+\medskip
+
+\begin{center}
+\textcolor{myblue}{Single estimated parameter: $q$ (per-contact-per-day transmission probability). \\ All other terms are fixed from biology, study design, or phylogenetic calibration.}
+\end{center}
+
+
+## Infectiousness Profile: Omicron Gamma Profile ( Or Weibull ?)
+
+:::: {.columns}
+::: {.column width="60%"}
+
+\begin{center}
+\includegraphics[width=\linewidth]{../results/infectiousness_profile.png}
+\end{center}
+
+:::
+::: {.column width="36%"}
+
+**Omicron Gamma profile**
+
+$$f(t) \propto \text{Gamma}(\mu{=}3.3,\,\sigma{=}1.5)$$
+
+- Peaks around day 3 (≈ symptom onset)
+- Near-zero by day 10
+- Source: Kim et al.\ (2022); Backer et al.\ (2022)
+
+:::
+::::
+
+## The Observed `timetoinf` Distribution
+
+
+This is the observed distribution of the time to infection (PCR-positive day relative to enrollment) among infected enrolled contacts. The true infection day is interval-censored between `timetoinf - 1` and `timetoinf`.
+
+\footnotesize
+timetoinf $=$ (infection day relative to enrollment) .
+
+- Do we need to add the incubation time of Omicron to this time in the model ? 
+
+
+
+## Our Model: Putting It All Together
+
+**Daily force of infection** on susceptible $i$ at day $t$ (additive hazards):
+
+$$\lambda_i(t) = \underbrace{\lambda_c}_{\text{community}} + \underbrace{q \cdot C_{a_i,\, a_\text{idx}} \cdot f(\tau + t)}_{\text{index case}} + \underbrace{\sum_{j \in \mathcal{I}(t)} q \cdot C_{a_i,\, a_j} \cdot f(t - t_j + 1)}_{\text{secondary infectors}}$$
+
+$f(\cdot)$: discretized Infectiousness profile (Gamma or Weibull).
+
+
+## Tsang \& Cauchemez (2023, eLife): Should we consider infectiousness Variation ? 
+
+
+In our study, we have access to S and N gene CT value at enrollment, we could use this data to modle the infectiousmess variation between index cases.
+
+Tsang \& Cauchemez (2023, eLife):
+**17 SARS-CoV-2 household studies, 13\,098 index cases.** Key innovation: a \textbf{log-normal random effect} $\delta_i \sim \mathcal{N}(0,\sigma_\text{var}^2)$ on each index case's infectiousness, within the same additive-hazard escape-probability framework we use:
+
+$$\lambda_{i \to j}(t) = \frac{\lambda_h}{X_k} \cdot \exp(\delta_i) \cdot f(t - t_i)$$
+
+
+##  Escape Probability
+
+**Cumulative escape** — built day-by-day recursively:
+
+$$E_i(0) = 1, \qquad E_i(t) = E_i(t-1)\cdot e^{-\lambda_i(t)}$$
+
+**Likelihood contribution** for enrolled contact $i$:
+
+$$\ell_i = \begin{cases}
+  E_i(t_i - 1) - E_i(t_i) = \underbrace{E_i(t_i-1)}_{\text{survived days }1\ldots t_i{-}1} \times \underbrace{(1 - e^{-\lambda_i(t_i)})}_{\text{infected day }t_i} & \text{infected on day } t_i \\[4pt]
+  E_i(T_\text{follow}) & \text{not infected}
+\end{cases}$$
+
+\medskip
+\footnotesize
+The full escape sequence up to $T_\text{follow}$ is computed once per contact call; only two adjacent entries are read per likelihood case.
+
+
+## What Type of Model Is This?
+
+:::: {.columns}
+::: {.column width="50%"}
+
+**Discrete-time survival model** \textcolor{mygreen}{\ding{51}}
+
+Each contact is at risk of infection every day until they either get infected or the follow-up ends — exactly like a survival analysis with daily intervals.
+
+\medskip
+
+| Survival concept | Our model |
+|---|---|
+| Hazard $h(t)$ | $\lambda_i(t)$ — daily force of infection |
+| Survival $S(t)$ | $E_i(t)$ — cumulative escape |
+| Event at $t_i$ | $E_i(t_i{-}1) - E_i(t_i)$ |
+| Right-censored | $E_i(T_\text{follow})$ |
+
+:::
+::: {.column width="46%"}
+
+**Not a Poisson model** \textcolor{myred}{\ding{55}}
+
+A Poisson model would predict a **count** of infections. Our outcome is binary: infected on day $t_i$, or not.
+
+\medskip
+
+**Where Poisson appears — and only there:**
+
+The daily escape $e^{-\lambda_i(t)}$ is *derived* by assuming infectious contacts arrive as a Poisson process within a day. It justifies the exponential form.
+
+\medskip
+
+\begin{center}
+\textcolor{myblue}{Poisson mechanism $\Rightarrow$ exponential escape $\Rightarrow$ \textbf{survival likelihood}}
+\end{center}
+
+:::
+::::
+
+
+## How to handle missing member ? Latent Variables for Missing Members
+
+For each non-enrolled member $k$ in household $h$, three discrete latent variables:
+
+\medskip
+
+| Variable | Domain | Meaning |
+|---|---|---|
+| $Y_{hk}$ | $\{0, 1\}$ | Infection indicator |
+| $T_{hk}$ | $\{1, \ldots, 14\}$ | Day of infection (only if $Y_{hk} = 1$) |
+| $a_k$ | Child / Adult / Elderly | Age group |
+
+\medskip
+
+Updated jointly via **exact Gibbs steps** — finite discrete support means no acceptance step needed: enumerate all values, compute unnormalized posteriors, normalize, and draw directly.
+
+\medskip
+
+**Corrected SAR from each posterior draw $s$:**
+
+$$\text{SAR}_\text{corrected}^{(s)} = \frac{n_\text{obs. infected} + \displaystyle\sum_{h,k} Y_{hk}^{(s)}}{n_\text{obs. contacts} + n_\text{total missing}}$$
+
+where $n_\text{total missing} = 124$ across 59/93 households.
+
+## {.plain}
+
+\vfill
+\begin{center}
+{\Huge \textbf{Part 3}}\\[1em]
+{\LARGE Thank you for listening !}
+\end{center}
+\vfill
+
+
+## The Markov Chain: Starting State and Transitions
+
+:::: {.columns}
+::: {.column width="48%"}
+
+**1. Starting state $\theta^{(0)}$**
+
+\footnotesize
+
+| Unknown | Initialization |
+|---|---|
+| $q^{(0)}$ | 0.02 (fixed) |
+| $Y_{hk}^{(0)}$ | $\sim \text{Bernoulli}(0.3)$ |
+| $T_{hk}^{(0)}$ | $\sim \text{Uniform}\{1,\ldots,14\}$ if $Y=1$ |
+| $a_k^{(0)}$ | $\sim$ MICS6 prior for household $h$ |
+
+\normalsize
+
+\medskip
+
+The starting state is arbitrary — the chain converges to the posterior regardless, after a **burn-in** of 2,000 iterations.
+
+:::
+::: {.column width="48%"}
+
+**2. Transition probabilities**
+
+\footnotesize
+
+| Parameter | Method | How |
+|---|---|---|
+| $q$ | MH | Propose $q^* = q \cdot e^\epsilon$; accept/reject |
+| $Y_{hk}$ | Gibbs | Enumerate $\{0,1\}$; draw exactly |
+| $T_{hk}$ | Gibbs | Enumerate $\{1,\ldots,14\}$; draw exactly |
+| $a_k$ | Gibbs | Enumerate $\{C,A,E\}$; draw exactly |
+
+\normalsize
+
+\medskip
+
+Each transition depends only on the **current state** $\theta^{(s)}$ — this is the Markov property.
+
+After burn-in: $\theta^{(s)} \sim \pi(q, Y, T, a \mid \text{data})$
+
+:::
+::::
+
+
+## How Does the MCMC Sample the Missing Members?
+
+**Each iteration updates four things in sequence:**
+
+\medskip
+
+:::: {.columns}
+::: {.column width="52%"}
+
+\footnotesize
+
+| Step | What is updated | How |
+|---|---|---|
+| 1 | $q$ (transmission prob.) | Metropolis–Hastings: propose, accept/reject |
+| 2 | $Y_{hk}$ (infected?) | Gibbs: compute $P(Y{=}0)$ vs $P(Y{=}1)$, draw |
+| 3 | $T_{hk}$ (infection day) | Gibbs: enumerate days 1–14, weight by likelihood, draw |
+| 4 | $a_k$ (age group) | Gibbs: enumerate C/A/E, weight by MICS6 prior $\times$ likelihood, draw |
+
+\normalsize
+
+:::
+::: {.column width="44%"}
+
+**Key idea:** we never fix a single value for a missing member — at each iteration we draw a plausible scenario consistent with the transmission model and the rest of the household.
+
+\medskip
+
+After $\sim$8,000 iterations the corrected SAR is:
+
+$$\widehat{\text{SAR}}^{(s)} = \frac{n_\text{infected} + \sum_{h,k} Y_{hk}^{(s)}}{n_\text{contacts} + n_\text{missing}}$$
+
+The **spread across draws** is the posterior uncertainty interval.
+
+:::
+::::
+
+
+## `compute_escape_seq`: Two Distinct Roles
+
+`compute_escape_seq` is called in **every MCMC step** but with different infector lists:
+
+\medskip
+
+:::: {.columns}
+::: {.column width="50%"}
+
+**Role 1 — Likelihood** (`hh_loglik_timed`)
+
+Infectors: all enrolled infected contacts + infected missing members $k' \neq k$
+
+$$E_i^\text{lik}(t) \;\longrightarrow\; \ell_i = E_i(t-1) - E_i(t)$$
+
+Used in: **all four MCMC steps**
+
+:::
+::: {.column width="46%"}
+
+**Role 2 — Prior** (`prior_miss`)
+
+Infectors: **none** — index + community only
+
+$$E_k^\text{prior}(t) \;\longrightarrow\; P(Y_{hk}{=}1, T_{hk}{=}t) \propto E_k^\text{prior}(t-1) - E_k^\text{prior}(t)$$
+
+Used in: **Gibbs steps 2, 3, 4 only**
+
+:::
+::::
+
+\medskip
+
+| MCMC step | Calls $E^\text{lik}$? | Calls $E^\text{prior}$? |
+|---|:---:|:---:|
+| MH for $q$ | \checkmark | — |
+| Gibbs for $Y_{hk}$ | \checkmark | \checkmark |
+| Gibbs for $T_{hk}$ | \checkmark ($\times\, T_\text{follow}$ candidates) | \checkmark |
+| Gibbs for $a_k$ | \checkmark ($\times$ 3 ages) | \checkmark ($\times$ 3 ages) |
+
+The prior uses no secondary infectors to avoid circular dependence: $k$'s state cannot enter its own Gibbs prior.
+
+## MCMC Sampler: Overview
+
+**Single chain — 10,000 iterations — 2,000 burn-in — thinning 5 — $\approx$ 1,600 posterior draws**
+
+\medskip
+
+**Four update components per iteration:**
+
+| Step | Target | Method | Precedent |
+|---|---|---|---|
+| 1 | $q$ | MH — log-scale random walk | Cauchemez et al. (2004, 2009) |
+| 2 | $Y_{hk}$, all missing | Exact Gibbs — two-way | Cauchemez et al. (2004) |
+| 3 | $T_{hk}$, infected missing only | Exact Gibbs — enumerate $t = 1\ldots 14$ | Cauchemez et al. (2004) |
+| 4 | $a_k$, all missing | Exact Gibbs — three-way + MICS prior | Walker et al. (2017) |
+
+\medskip
+
+**MH for $q$:** Beta(1, 19) prior (mean 0.05); log-scale proposal $\sigma_q = 0.015$.
+
+**Convergence:** trace plot + ESS for $q$; target MH acceptance rate 20–40%.
+
+\medskip
+
+\footnotesize \textit{Note: $C[\text{Adult},\text{Adult}] = 2.72$ (Prem THA matrix) means the log-likelihood peaks near $q \approx 0.02$ rather than 0.05 when missing members are at $Y=0$. This is a known consequence of using population-average contact rates without per-individual normalisation. Run the full chain before interpreting $q$.}
+
+
+## Updates 2–4: Exact Gibbs Steps
+
+Each step evaluates **likelihood** ($E^\text{lik}$ via `hh_loglik_timed`) **+** **prior** ($E^\text{prior}$ via `prior_miss`) and normalizes.
+
+\medskip
+
+**Update 2 — $Y_{hk}$ (exact two-way Gibbs):**
+
+$$\tilde{p}_0 = \underbrace{\ell(q, h \mid Y_{hk}=0)}_{\text{likelihood: }E^\text{lik}} + \underbrace{\log E_k^\text{prior}(T_\text{follow})}_{\text{prior: }P(Y{=}0)}$$
+$$\tilde{p}_1 = \underbrace{\ell(q, h \mid Y_{hk}=1,\, T^\text{prop})}_{\text{likelihood: }E^\text{lik}} + \underbrace{\log\bigl[E_k^\text{prior}(T^\text{prop}{-}1) - E_k^\text{prior}(T^\text{prop})\bigr]}_{\text{prior: }P(Y{=}1,\,T{=}T^\text{prop})}$$
+
+Draw $Y_{hk} \sim \text{Bernoulli}(\text{softmax}(\tilde{p}_1))$. When $Y$ flips $0 \to 1$, draw $T_{hk}$ from the prior $T$-distribution.
+
+\medskip
+
+**Update 3 — $T_{hk}$:** enumerate $t \in \{1,\ldots,14\}$; compute $\ell(E^\text{lik}) + \log[E_k^\text{prior}(t{-}1) - E_k^\text{prior}(t)]$; normalize and sample.
+
+**Update 4 — $a_k$:** for each age, compute $\ell(E^\text{lik}) + \log P(Y,T \mid a_k) + \log\pi_a^{(h)}$; normalize and sample. Both $E^\text{lik}$ and $E^\text{prior}$ depend on $a_k$ through $C_{a_k,\cdot}$.
+
+
+## Our Adaptation: What We Keep and What We Add
+
+:::: {.columns}
+::: {.column width="50%"}
+
+**Inherited from the literature:**
+
+| Element | Source |
+|---|---|
+| Additive hazard + escape likelihood | Tsang \& Cauchemez (2023) |
+| Discrete-time daily steps | Cauchemez et al. (2004) |
+| Community hazard $p_\text{bg}$ | Cauchemez et al. (2004, 2009) |
+| Age matrix $C_{a_i, a_j}$ | Cauchemez et al. (2009) |
+| MCMC augmentation of infection times | O'Neill \& Roberts (1999); Cauchemez (2004) |
+| Age prior from population survey | MICS6 Thailand 2022 |
+
+:::
+::: {.column width="46%"}
+
+**Our extensions — unique to this study:**
+
+\medskip
+
+For each non-enrolled member $k$ in household $h$:
+
+$$\underbrace{Y_{hk}}_{\in \{0,1\}} \quad \underbrace{T_{hk}}_{\in \{1,\ldots,14\}} \quad \underbrace{a_k}_{\in \{C, A, E\}}$$
+
+Updated via **exact Gibbs steps** (finite discrete support).
+
+\medskip
+
+Missing members:
+- **receive** force of infection from active infectors
+- **transmit** to enrolled contacts if $Y_{hk} = 1$
+
+$\Rightarrow$ They enter both likelihood and prior simultaneously
+
+:::
+::::
+
+
+# Part 4 — Results and Outlook
+
+## Results: Summary
+
+\medskip
+
+:::: {.columns}
+::: {.column width="56%"}
+
+**Posterior of $q$ (per-contact-per-day):**
+
+$$q: \text{ median} \quad (95\%\text{ CrI})$$
+
+\medskip
+
+**Corrected SAR:**
+
+| Estimate | SAR | 95% interval |
+|---|---|---|
+| GEE — Khamduang et al. (2026) | 23.5% | — |
+| Enrolled only (observed) | — | (Wilson CI) |
+| **Corrected chain-binomial** | **TBD** | **posterior CrI** |
+
+\medskip
+
+\footnotesize Note: GEE SAR and chain-binomial SAR are not the same estimand — GEE conflates pairwise probability with attack rate (Sharker \& Kenah 2021).
+
+:::
+::: {.column width="40%"}
+
+**Expected infections among missing members:**
+
+$$E\!\left[\sum_{h,k} Y_{hk}\right] \quad (95\%\text{ CrI})$$
+
+\medskip
+
+**Convergence:**
+
+- Trace plot — $q$
+- ESS — $q$
+- MH acceptance rate (target 20–40%)
+
+:::
+::::
+
+
+## Key Assumptions and Limitations
+
+\footnotesize
+
+| Assumption | Status | Impact if violated |
+|---|---|---|
+| $\tau = 2$ days fixed | Primary; sensitivity $\tau \in \{1, 3\}$ | Shifts index transmission window |
+| Single $q$, no Ct modifier | Base model; $\beta_\text{Ct}$ planned | Absorbs infectiousness heterogeneity |
+| No IgG modifier for missing members | MCAR via venipuncture refusal | Minor if IgG prevalence similar in missing |
+| Index is sole primary infector | Known gap; $p_\text{bg}$ partially corrects | Inflates $q$ if co-primaries misattributed |
+| Fixed $p_\text{bg} = 0.003$/day (constant) | Primary; time-varying sensitivity planned | Hazard varied across 2022–2024 sub-waves |
+| MCAR missingness | Supported by paper sub-analysis | If IgG+ more likely to refuse $\Rightarrow$ upward bias |
+| Density-independent contact matrix | Known structural limit; $\gamma$ sensitivity planned | $C[\text{A,A}] = 2.72$ is group rate, not per-individual; pushes MLE $q$ down to $\approx 0.02$ |
+| Gamma infectiousness profile fixed at $\mu=3.3\,\text{d}$ | Omicron biology (He et al. 2022; Ejima NEJM 2022) | Absorbs generation-time uncertainty into $q$ |
+
+
+## Planned Extensions and Sensitivity Analyses
+
+:::: {.columns}
+::: {.column width="50%"}
+
+**High priority**
+
+1. **Density-dependent correction:**
+$$\lambda_{ij} = q \cdot C_{a_i, a_j} / n_h^\gamma, \quad \gamma \in \{0, 0.5, 1\}$$
+(Goeyvaerts et al. 2018)
+
+2. **Ct infectiousness modifier** (planned, requires identifiability check with $n = 44$):
+$$\lambda_{ij} \mathrel{+}= q \cdot \beta_\text{Ct} \cdot \text{Ct}_\text{idx}$$
+
+3. **Per-household $\tau_h$:** discrete latent Uniform$\{0,1,2\}$, exact 3-way Gibbs
+
+4. **Multiple chains** for $\hat{R}$ convergence diagnostics
+
+:::
+::: {.column width="46%"}
+
+**Sensitivity analyses**
+
+1. $\tau \in \{1, 3\}$
+
+2. Time-varying $p_\text{bg}(t)$ — provincial situation reports for shape only
+
+3. Simulation study: bias from partial household observation (full vs. partially observed network) — Belgium collaborators' request
+
+:::
+::::
+
+
+## References
+
+\footnotesize
+
+- **Khamduang et al. (2026).** Household SARS-CoV-2 transmission during Omicron wave in Chiang Mai, Thailand. *Lancet Regional Health — Southeast Asia.* *(Primary study manuscript.)*
+- **O'Neill \& Roberts (1999).** Bayesian inference for partially observed stochastic epidemics. *JRSS-A.*
+- **Cauchemez et al. (2004).** A Bayesian MCMC approach to study transmission of influenza. *Statistics in Medicine.*
+- **Cauchemez et al. (2009).** Household transmission of 2009 pandemic influenza A (H1N1). *NEJM.*
+- **Tsang \& Cauchemez (2023).** Effect of variation of individual infectiousness on SARS-CoV-2 transmission in households. *eLife.*
+- **Sharker \& Kenah (2021).** Estimating and interpreting secondary attack risk: binomial considered biased. *PLOS Computational Biology.*
+- **Prem et al. (2021).** Projecting contact matrices in 177 geographical regions. *PLOS Computational Biology.*
+- **Goeyvaerts et al. (2018).** Household members do not contact each other at random. *Proc. R. Soc. B.*
+- **Ejima et al. (2022).** Duration of shedding of culturable virus in SARS-CoV-2 Omicron infection. *NEJM.*
+- **Manica et al. (2022).** Intrinsic generation time of SARS-CoV-2 Omicron. *Lancet Regional Health — Europe.*
+- **Madewell et al. (2023).** Serial intervals for SARS-CoV-2 Delta and Omicron. *BMC Infectious Diseases.*
+- **UNICEF MICS6 (2022).** Thailand Multiple Indicator Cluster Survey. Chiang Mai stratum.
+
+
+# Backup Slides — Q\&A
+
+## *Q: Why update $a_k$ via Gibbs — why not just use the MICS prior?*
+
+$a_k$ is not a covariate — it enters the **likelihood** in two directions, so the data can pull it away from the prior.
+
+\medskip
+
+:::: {.columns}
+::: {.column width="50%"}
+
+**As a susceptible** — $a_k$ sets how much force of infection $k$ receives from the index ($q \cdot C_{a_k,\, a_\text{idx}}$), shifting $P(Y_{hk}=1, T_{hk}=t)$
+
+\medskip
+
+**As an infector** (when $Y_{hk}=1$) — $a_k$ sets the hazard $k$ generates toward every enrolled contact $i$:
+$$\lambda_i(t) \mathrel{+}= q \cdot C_{a_i,\, a_k}$$
+which directly enters each $\ell_i = E_i(t-1) - E_i(t)$
+
+:::
+::: {.column width="46%"}
+
+**Concrete example:**
+
+An enrolled Adult is infected on day 8, after the index's window has closed.
+
+$\Rightarrow$ The model needs a secondary infector.
+
+If the missing member is assigned **Child**, $C_{\text{Adult, Child}}$ is high $\Rightarrow$ this transmission chain is plausible $\Rightarrow$ likelihood favours Child over what the MICS prior alone would suggest.
+
+:::
+::::
+
+\medskip
+
+Fixing $a_k$ at the prior would underestimate posterior uncertainty in the corrected SAR and bias the likelihood whenever a missing member is the probable secondary infector.
+
+
+## *Q: Why not use a continuous-time SIR (as in Cauchemez 2004)?*
+
+:::: {.columns}
+::: {.column width="50%"}
+
+**Cauchemez 2004 augments:**
+
+- Continuous start $\nu_i$ and end $\psi_i$ of infectious period per infector
+- Variable-dimension: number of infections $m$ is unknown
+- Requires 3-move MH (move/add/remove infection times)
+- Requires observation model linking symptom onset $Z_i$ to $\nu_i$
+
+:::
+::: {.column width="46%"}
+
+**Why discrete-time fits better here:**
+
+\textcolor{mygreen}{\ding{51}} `timetoinf` is inherently discrete (PCR every 2 days) — discrete likelihood matches the data structure exactly
+
+\textcolor{mygreen}{\ding{51}} Missing-member latent variables $(Y_{hk}, T_{hk})$ are naturally discrete — enables exact Gibbs with no acceptance step
+
+\textcolor{mygreen}{\ding{51}} Only 44 secondary infections — adding per-infector $\nu_i, \psi_i$ as continuous latents risks non-identifiability
+
+\textcolor{mygreen}{\ding{51}} Gamma infectiousness profile fixed from Omicron biology (He et al. 2022) — no need to estimate generation time distribution
+
+:::
+::::
+
+
+## *Q: Is the R compartment explicitly modelled?*
+
+The model is **SIR-structured** but the R compartment is implicit.
+
+\medskip
+
+| State | Who | Transition |
+|---|---|---|
+| **S** | susceptible contacts, missing members | $\to$ I on infection |
+| **I** | index (days 1 to $D{-}\tau$), infected contacts (days $t_j$ to $t_j{+}D{-}1$), infected missing members | $\to$ R after $D$ days |
+| **R** | recovered — no longer infectious | absorbing |
+
+\medskip
+
+**R is implicit in the code:** `compute_escape_seq` stops adding infector $j$ to the hazard once `t >= inf$start + D`. There is no explicit R flag.
+
+**Re-infection is prevented** not by a state flag but by the likelihood structure: each enrolled contact's likelihood is computed only up to their infection day $t_i$ — the escape sequence continues past $t_i$ but those values are never read.
+
+
+## Cauchemez et al. (2009): §3 — Sensitivity Analyses
+
+\footnotesize
+
+**§3.1 — Susceptibility models** (Table SM1): Including both child and older-adult modifiers (Model D) gives best DIC (611.91); excluding age entirely (Model A, DIC 623.96) substantially worse.
+
+\medskip
+
+**§3.2 — Household-size dependency** (Table SM2): \textcolor{myred}{\textbf{Constant model ($g(n)=\beta$) formally rejected}} — DIC 625.83 vs.\ 611.91 (ΔDIC=13.9), $p_\text{Exp-Obs}=0.009$, LRT $p<0.001$. Best parametric fit: Power model A $\beta\cdot(3/n)^\delta$ ($\hat{\delta}=2.51$, DIC 608.81) and Exponential $\beta\cdot\exp\{-\delta(n{-}3)\}$ ($\hat{\delta}=0.81$, DIC 608.09).
+
+\medskip
+
+**§3.3–3.4 — Community risk and serial interval**: Exponential community growth does not improve fit ($p=0.33$). Age-specific serial interval does not improve fit ($p=0.33$). Single constant $\alpha$ and single Weibull SI are sufficient.
+
+\medskip
+
+**§3.5 — Missing onset dates**: 11 households with unknown onset timing augmented as latent variables via MCMC (prior: uniform over days 0–7). Main impact: community risk estimate increases; all other parameters (g(n), susceptibility, SI) are robust. Probability of co-primary case estimated at $2.8\%$ (CrI 1.7–4.4).
+
+\medskip
+
+**§3.7 — Infectivity models** (Table SM9): Age, cough, fever, runny nose, sore throat, diarrhea — none significant (all LRT $p>0.08$). Constant infectivity ($\mu_\text{inf}=1$) retained.
+
+\normalsize
+
+\medskip
+\begin{center}
+\textcolor{myblue}{\small \textbf{Key message for VERDI:} $\gamma=0$ (constant household-size hazard) is empirically refuted. §3.5 validates treating members with missing timing as latent variables — directly analogous to our $T_{hk}$ Gibbs step.}
+\end{center}
+
+
+
+## What the Literature Handles — and What It Doesn't
+
+:::: {.columns}
+::: {.column width="50%"}
+
+**Already solved in the literature:**
+
+\textcolor{mygreen}{\ding{51}} Additive hazard + escape probability likelihood
+
+\textcolor{mygreen}{\ding{51}} Community hazard term $\lambda_c$
+
+\textcolor{mygreen}{\ding{51}} Tertiary transmission chains
+
+\textcolor{mygreen}{\ding{51}} Age-stratified contact matrix $C_{a_i, a_j}$
+
+\textcolor{mygreen}{\ding{51}} MCMC augmentation of unobserved infection timing
+
+\textcolor{mygreen}{\ding{51}} Bayesian posterior credible interval for SAR
+
+:::
+::: {.column width="46%"}
+
+**The gap — not handled anywhere:**
+
+\textcolor{myred}{\ding{55}} \textbf{Non-enrolled members} — their infection status, timing, and age are entirely unobserved
+
+\textcolor{myred}{\ding{55}} Missing members as potential \textbf{secondary infectors} for enrolled contacts
+
+\textcolor{myred}{\ding{55}} Corrected SAR denominator accounting for unobserved members
+
+:::
+::::
+
+\medskip
+
+\begin{center}
+\textcolor{myblue}{\textbf{Our contribution: extend the Cauchemez/Tsang framework to handle non-enrolled members as three-dimensional latent variables $(Y_{hk},\, T_{hk},\, a_k)$.}}
+\end{center}
+
+
+## Household Transmission Models: Key Precedents
+
+\footnotesize
+
+| Paper | Data | Method | 
+|---|---|---|---|
+| Cauchemez et al. (2009) *NEJM* | H1N1 216 HH | **Primary likelihood reference**: Age-stratified Bayesian; tertiary chains | 
+| Tsang \& Cauchemez (2023) *eLife* | SARS-CoV-2 17 studies | Add infectiousness variation | 
+
+\normalsize
+
+\medskip
+
+**Common thread across these models:** partially observed epidemic process $\rightarrow$ data augmentation of unobserved infection times/states $\rightarrow$ Bayesian MCMC.
+
+**The gap:** none treats **non-enrolled household members** as latent variables in the transmission model.
+
+
+## Cauchemez et al. (2009): 2.3 — Algorithm
+
+**§2.3 — Algorithm**
+
+Metropolis-Hastings for **all** parameters (no Gibbs).
+
+\medskip
+
+\textcolor{myblue}{\small \textbf{Our adaptation:} MH only for $q$ (log-scale random walk); exact Gibbs for $Y_{hk}$, $T_{hk}$, $a_k$ — more efficient given the discrete latent space.}
+
+
+## Cauchemez et al. (2009): §2.1 — Likelihood Function
+
+Inference is conditioned on what is observed in the household on day 0.
+
+\medskip
+
+**Contact $j$ with symptom onset on day $d$:**
+
+$$P(d_j = d \mid \theta) = \bigl(1 - e^{-\lambda_j(d)}\bigr) \cdot \exp\!\Bigl\{-\sum_{0 < u < d} \lambda_j(u)\Bigr\}$$
+
+\begin{center}
+$= \underbrace{E_j(d-1)}_{\text{survived days 1..}d-1} - \underbrace{E_j(d)}_{\text{survived through day }d}$
+\end{center}
+
+\medskip
+
+**Contact $j$ who remains uninfected through day $T$:**
+
+$$P(d_j = \infty \mid \theta) = \exp\!\Bigl\{-\sum_{0 < u \leq T} \lambda_j(u)\Bigr\} = E_j(T)$$
+
+\medskip
+
+Index cases and co-primary cases (onset on day 0) **do not contribute** to the likelihood.
+
+\medskip
+
+\begin{center}
+\textcolor{myblue}{\small \textbf{This supplement (§2.1) is the canonical written source for our $E_i(t)$ escape-probability recursion.} The two cases — $E_j(d{-}1)-E_j(d)$ for timed infections, $E_j(T)$ for uninfected — are implemented verbatim in \texttt{hh\_loglik\_timed}.}
+\end{center}

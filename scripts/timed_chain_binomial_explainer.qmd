@@ -1,0 +1,409 @@
+---
+title: "How the timed chain-binomial likelihood works"
+subtitle: "A worked example for collaborators"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    fig-width: 9
+    fig-height: 5
+editor: visual
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+theme_set(theme_minimal(base_size = 13))
+```
+
+## The core question
+
+In a household transmission study, we observe whether each contact became infected during follow-up — and crucially, **when** they first tested positive. The timed chain-binomial uses both pieces of information: infection/no-infection *and* the day of first positive test (`timetoinf`).
+
+The key objects are:
+
+- $q$ — per-contact-per-day transmission probability (what we want to estimate)
+- $E_i(t)$ — probability that contact $i$ is still susceptible at the end of day $t$
+- $\mathcal{L}_i$ — likelihood contribution of contact $i$
+
+------------------------------------------------------------------------
+
+## The example household
+
+We use a minimal household: one index case and two contacts.
+
+```{r household}
+# ── Parameters ────────────────────────────────────────────────────────────────
+q     <- 0.10   # per-contact-per-day transmission probability
+p_bg  <- 0.003  # daily community acquisition probability
+D     <- 5      # infectious period (days)
+tau   <- 2      # days index was ALREADY infectious before day 1 of study
+                # (48h enrollment criterion → tau in {1,2,3})
+T_follow <- 14  # observation window
+
+# Simplified contact matrix (Child/Adult rates, contact-per-person-per-day)
+# Derived from Prem et al. 2021 (Thailand, home setting)
+C <- list(
+  Adult_Adult = 1.50,
+  Child_Adult = 1.20   # Child susceptible, Adult infector
+)
+
+# ── Household members ─────────────────────────────────────────────────────────
+# Index: Adult, already infectious for tau=2 days → D-tau=3 remaining days
+# Contact A: Adult, tests positive on day 3  (timetoinf = 3)
+# Contact B: Child, never infected            (timetoinf = NA)
+
+cat("Index case:  Adult\n")
+cat(sprintf("  Infectious from:  %d days before enrollment\n", tau))
+cat(sprintf("  Remaining infectious days from day 1:  %d (days 1–%d)\n",
+            D - tau, D - tau))
+cat("\nContact A:  Adult,  timetoinf = 3  (first positive PCR on day 3)\n")
+cat("Contact B:  Child,  not infected\n")
+```
+
+> **Key constraint from the study:** index cases were enrolled within 48 hours of their positive test. Since Omicron has a short pre-symptomatic infectious period (\~0–1 day), `tau` is most plausibly 1–3 days. We use `tau = 2` here.
+
+------------------------------------------------------------------------
+
+## Step 1 — who is infectious on each day?
+
+Before computing any probabilities, we need to know which household members are infectious on each day of follow-up.
+
+```{r infectious_windows, fig.height=3.5}
+days <- 1:T_follow
+
+# Index: infectious on days 1 .. (D - tau)
+index_window <- seq_len(max(0, D - tau))   # days 1, 2, 3
+
+# Contact A: infectious from timetoinf_A to timetoinf_A + D - 1
+timetoinf_A <- 3L
+contactA_window <- seq(timetoinf_A, timetoinf_A + D - 1)
+
+tibble(
+  Day    = days,
+  Index  = ifelse(Day %in% index_window, "infectious", "recovered"),
+  `Contact A` = ifelse(Day %in% contactA_window, "infectious", "susceptible/recovered")
+) %>%
+  pivot_longer(-Day, names_to = "Person", values_to = "Status") %>%
+  ggplot(aes(x = Day, y = Person, fill = Status)) +
+  geom_tile(colour = "white", linewidth = 0.6) +
+  scale_x_continuous(breaks = 1:T_follow) +
+  scale_fill_manual(values = c(
+    infectious           = "#E63946",
+    recovered            = "#a8dadc",
+    "susceptible/recovered" = "#457B9D"
+  )) +
+  geom_vline(xintercept = timetoinf_A - 0.5,
+             linetype = "dashed", colour = "#2a9d8f", linewidth = 0.8) +
+  annotate("text", x = timetoinf_A, y = 2.55,
+           label = "Contact A\ninfected", colour = "#2a9d8f", size = 3.5) +
+  labs(title = "Infectious windows by day",
+       subtitle = sprintf("Index: tau=%d days pre-enrolled → infectious days 1–%d from study start",
+                          tau, D - tau),
+       x = "Day (from enrollment)", y = NULL, fill = NULL) +
+  theme(legend.position = "bottom")
+```
+
+------------------------------------------------------------------------
+
+## Step 2 — the daily escape probability
+
+On each day, a susceptible contact has a chance of **escaping** infection from every active infector and from the community. We compute this day by day.
+
+$$\text{daily_escape}_i(t) = (1 - p_\text{bg})
+  \prod_{j\,:\,\text{infectious on day }t}(1 - q \cdot C_{a_i,\, a_j})$$
+
+The **cumulative escape probability** $E_i(t)$ is the probability that contact $i$ is still susceptible at the end of day $t$:
+
+$$E_i(t) = \prod_{s=1}^{t} \text{daily\_escape}_i(s), \qquad E_i(0) = 1$$
+
+```{r escape_seq}
+compute_escape_seq <- function(q, p_bg, D, sus_age, index_age,
+                                tau, C, secondary_infectors = list(),
+                                T_follow = 14L) {
+  # secondary_infectors: list of list(age, start_day)
+  index_days <- max(0L, D - tau)
+  esc        <- numeric(T_follow + 1L)
+  esc[1L]    <- 1.0
+
+  for (t in seq_len(T_follow)) {
+    day_esc <- 1 - p_bg
+
+    # Index contribution
+    if (t <= index_days) {
+      rate    <- q * C[[paste0(sus_age, "_", index_age)]]
+      day_esc <- day_esc * (1 - min(rate, 1 - 1e-9))
+    }
+
+    # Secondary infectors
+    for (inf in secondary_infectors) {
+      if (t >= inf$start && t < inf$start + D) {
+        rate    <- q * C[[paste0(sus_age, "_", inf$age)]]
+        day_esc <- day_esc * (1 - min(rate, 1 - 1e-9))
+      }
+    }
+
+    esc[t + 1L] <- esc[t] * day_esc
+  }
+  esc
+}
+```
+
+### Contact A (Adult, infected on day 3)
+
+Contact A is only exposed to the **index case** — they are the first to get infected, so no secondary infectors precede them.
+
+```{r escape_A, fig.height=4}
+esc_A <- compute_escape_seq(q, p_bg, D, "Adult", "Adult", tau, C,
+                             secondary_infectors = list(), T_follow = T_follow)
+
+df_A <- tibble(
+  t   = 0:T_follow,
+  E_t = esc_A
+)
+
+# Likelihood = drop at day timetoinf_A
+lik_A <- esc_A[timetoinf_A] - esc_A[timetoinf_A + 1L]
+
+ggplot(df_A, aes(x = t, y = E_t)) +
+  geom_step(colour = "#457B9D", linewidth = 1.2, direction = "hv") +
+  geom_point(size = 2.5, colour = "#457B9D") +
+
+  # Highlight E(t_inf - 1) and E(t_inf) — the likelihood = gap between them
+  geom_segment(
+    aes(x = timetoinf_A - 1, xend = timetoinf_A - 1,
+        y = esc_A[timetoinf_A + 1L], yend = esc_A[timetoinf_A]),
+    colour = "#E63946", linewidth = 2, linetype = "solid"
+  ) +
+  annotate("text", x = timetoinf_A - 0.5, y = mean(esc_A[timetoinf_A:(timetoinf_A + 1L)]),
+           label = sprintf("L_A = E(%d) − E(%d)\n= %.4f − %.4f\n= %.4f",
+                           timetoinf_A - 1, timetoinf_A,
+                           esc_A[timetoinf_A], esc_A[timetoinf_A + 1L], lik_A),
+           hjust = -0.05, colour = "#E63946", size = 3.5) +
+
+  # Mark infection day
+  geom_vline(xintercept = timetoinf_A, linetype = "dashed",
+             colour = "#E63946", linewidth = 0.8) +
+  annotate("text", x = timetoinf_A + 0.1, y = 0.97,
+           label = "Day 3:\nfirst positive", hjust = 0,
+           colour = "#E63946", size = 3.5) +
+
+  scale_x_continuous(breaks = 0:T_follow) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  labs(title    = "Contact A (Adult) — cumulative escape probability E(t)",
+       subtitle = sprintf("Sources: index only | q=%.2f, tau=%d, D=%d, p_bg=%.3f",
+                          q, tau, D, p_bg),
+       x = "Day t", y = "P(still susceptible through day t)")
+```
+
+**Reading the plot:**
+
+- $E_A(0) = 1$: at the start of follow-up, Contact A is definitely susceptible.
+- Each day with the index infectious, $E_A(t)$ drops by a factor $(1 - q \cdot C_{\text{Adult,Adult}})(1 - p_\text{bg})$.
+- After day `r D - tau`, the index has recovered — drops are only from community hazard ($p_\text{bg}$), so $E_A$ flattens nearly to a horizontal line.
+- **The likelihood** $\mathcal{L}_A$ is the **height of the red segment**: the probability of *escaping through day 2* minus the probability of *escaping through day 3*. In other words: "susceptible until day 3, then caught on day 3."
+
+```{r table_A}
+df_A %>%
+  filter(t <= 7) %>%
+  mutate(
+    daily_esc = c(NA, round(diff(E_t) / lag(E_t)[-1], 4)),  # approximate
+    E_t       = round(E_t, 4)
+  ) %>%
+  rename(`Day t` = t, `E(t)` = E_t, `Daily escape factor` = daily_esc) %>%
+  knitr::kable(caption = "Escape probability for Contact A (first 7 days)")
+```
+
+------------------------------------------------------------------------
+
+## Step 3 — likelihood contribution by infection status
+
+The timed chain-binomial gives a different formula depending on whether a contact was infected:
+
+| Contact | Observed | Likelihood |
+|---------------------|-----------------------|----------------------------|
+| Infected on day $t_i$ | First positive PCR on day 3 | $\mathcal{L}_i = E_i(t_i - 1) - E_i(t_i)$ |
+| Never infected | Negative through day 14 | $\mathcal{L}_i = E_i(T_\text{follow})$ |
+
+Intuitively:
+
+- **Infected on day** $t_i$: the contact had to *escape* for $t_i - 1$ days, then *fail to escape* on day $t_i$.
+- **Never infected**: the contact had to escape *every single day* for 14 days.
+
+### Contact B (Child, not infected)
+
+Contact B is exposed to the index case and — once Contact A is infected on day 3 — also to Contact A. This is the **secondary-to-secondary** transmission path.
+
+```{r escape_B, fig.height=4}
+esc_B_no_chain <- compute_escape_seq(
+  q, p_bg, D, "Child", "Adult", tau, C,
+  secondary_infectors = list(),           # index only
+  T_follow = T_follow
+)
+
+esc_B_with_chain <- compute_escape_seq(
+  q, p_bg, D, "Child", "Adult", tau, C,
+  secondary_infectors = list(             # index + Contact A from day 3
+    list(age = "Adult", start = timetoinf_A)
+  ),
+  T_follow = T_follow
+)
+
+tibble(
+  t              = 0:T_follow,
+  `Index only`   = esc_B_no_chain,
+  `Index + Contact A` = esc_B_with_chain
+) %>%
+  pivot_longer(-t, names_to = "Infectors", values_to = "E_t") %>%
+  ggplot(aes(x = t, y = E_t, colour = Infectors)) +
+  geom_step(linewidth = 1.2, direction = "hv") +
+  geom_point(size = 2) +
+  geom_vline(xintercept = timetoinf_A, linetype = "dashed",
+             colour = "grey40", linewidth = 0.7) +
+  annotate("text", x = timetoinf_A + 0.1, y = 0.97,
+           label = "Contact A\nbecomes infector", hjust = 0,
+           colour = "grey30", size = 3.5) +
+  scale_x_continuous(breaks = 0:T_follow) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  scale_colour_manual(values = c("Index only" = "#457B9D",
+                                  "Index + Contact A" = "#E63946")) +
+  labs(title    = "Contact B (Child) — effect of secondary-to-secondary transmission",
+       subtitle = "Once Contact A tests positive on day 3, they add to Contact B's daily hazard",
+       x = "Day t", y = "P(still susceptible through day t)",
+       colour = "Infectors considered") +
+  theme(legend.position = "bottom")
+```
+
+The **gap between the two curves** shows how much Contact A's secondary infectiousness pushes Contact B's escape probability down — i.e., how much the chain-binomial differs from a model that only considers the index case.
+
+```{r lik_B}
+lik_B_no_chain   <- esc_B_no_chain[T_follow + 1L]
+lik_B_with_chain <- esc_B_with_chain[T_follow + 1L]
+
+cat(sprintf("Contact B likelihood (not infected):\n"))
+cat(sprintf("  Index only model:          E_B(%d) = %.4f\n",
+            T_follow, lik_B_no_chain))
+cat(sprintf("  With secondary chain:      E_B(%d) = %.4f\n",
+            T_follow, lik_B_with_chain))
+cat(sprintf("  Ratio: %.4f  (chain model assigns %.1f%% lower probability to 'not infected')\n",
+            lik_B_with_chain / lik_B_no_chain,
+            100 * (1 - lik_B_with_chain / lik_B_no_chain)))
+```
+
+------------------------------------------------------------------------
+
+## Step 4 — the full household log-likelihood
+
+```{r full_lik}
+loglik_no_chain   <- log(lik_A) + log(lik_B_no_chain)
+loglik_with_chain <- log(lik_A) + log(lik_B_with_chain)
+
+cat("Full household log-likelihood\n")
+cat(sprintf("  log L_A                    = log(%.4f) = %.4f\n",
+            lik_A, log(lik_A)))
+cat(sprintf("\n  [Index only model]\n"))
+cat(sprintf("  log L_B (not infected)     = log(%.4f) = %.4f\n",
+            lik_B_no_chain, log(lik_B_no_chain)))
+cat(sprintf("  TOTAL log-likelihood       = %.4f\n", loglik_no_chain))
+cat(sprintf("\n  [With secondary chain]\n"))
+cat(sprintf("  log L_B (not infected)     = log(%.4f) = %.4f\n",
+            lik_B_with_chain, log(lik_B_with_chain)))
+cat(sprintf("  TOTAL log-likelihood       = %.4f\n", loglik_with_chain))
+```
+
+------------------------------------------------------------------------
+
+## Step 5 — why this is better than the final-size (non-timed) model
+
+The **final-size model** (our previous approach) collapses the 14-day window into a single binomial draw. For each contact, it only asks "infected or not?" — ignoring *when*.
+
+For an infected contact: $$\mathcal{L}_i^{\text{final-size}} = 1 - E_i(T_\text{follow})$$ For an uninfected contact: $$\mathcal{L}_i^{\text{final-size}} = E_i(T_\text{follow})$$
+
+```{r comparison, fig.height=4.5}
+# For a range of timetoinf values, compare timed vs final-size likelihood
+t_range <- 1:T_follow
+
+lik_timed_vec <- sapply(t_range, function(ti) {
+  esc <- compute_escape_seq(q, p_bg, D, "Adult", "Adult", tau, C,
+                            secondary_infectors = list(), T_follow = T_follow)
+  esc[ti] - esc[ti + 1L]
+})
+
+# Final-size gives same likelihood regardless of when infection happened
+esc_final <- compute_escape_seq(q, p_bg, D, "Adult", "Adult", tau, C,
+                                 secondary_infectors = list(), T_follow = T_follow)
+lik_final <- 1 - esc_final[T_follow + 1L]
+
+tibble(
+  `Day of infection (timetoinf)` = t_range,
+  `Timed (chain-binomial)`       = lik_timed_vec,
+  `Final-size (non-timed)`       = lik_final
+) %>%
+  pivot_longer(-`Day of infection (timetoinf)`, names_to = "Model", values_to = "Likelihood") %>%
+  ggplot(aes(x = `Day of infection (timetoinf)`, y = Likelihood, colour = Model)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  geom_hline(yintercept = lik_final, linetype = "dashed",
+             colour = "#E63946", linewidth = 0.7) +
+  annotate("text", x = 13, y = lik_final + 0.003,
+           label = sprintf("Final-size = %.3f\n(same for all days)", lik_final),
+           hjust = 1, colour = "#E63946", size = 3.5) +
+  scale_x_continuous(breaks = 1:T_follow) +
+  scale_colour_manual(values = c("Timed (chain-binomial)" = "#457B9D",
+                                  "Final-size (non-timed)"  = "#E63946")) +
+  labs(title    = "Likelihood of 'infected' as a function of the day of infection",
+       subtitle = sprintf("Adult contact of Adult index | q=%.2f, tau=%d, D=%d",
+                          q, tau, D),
+       x = "Day of first positive PCR (timetoinf)",
+       y = "Likelihood contribution",
+       colour = NULL) +
+  theme(legend.position = "bottom")
+```
+
+**Key insight from this plot:**
+
+- In the **final-size model**, the likelihood is the same whether Contact A tested positive on day 1 or day 14 — the *timing* is completely ignored.
+- In the **timed model**, infection on **day 1 or 2** (while the index is still highly contagious) is *more probable* given our parameters → higher likelihood.
+- Infection on **days 4–14** (after the index has recovered) is less probable from the index alone → lower likelihood, which correctly puts pressure on the model to invoke secondary chains or community acquisition.
+- This is why the timed model correctly handles households like HH 42 (contacts positive on days 7 and 10): the final-size model silently attributes these to the index; the timed model correctly recognises they must have come from secondary chains or community exposure.
+
+------------------------------------------------------------------------
+
+## Summary
+
+```{r summary_table}
+tibble(
+  ` ` = c("Contact A (Adult)", "Contact B (Child)"),
+  `Observed` = c("Infected on day 3", "Not infected"),
+  `Infectors` = c("Index only", "Index + Contact A (from day 3)"),
+  `Model` = c("E_A(2) − E_A(3)", "E_B(14)"),
+  `Likelihood` = round(c(lik_A, lik_B_with_chain), 4),
+  `log L` = round(c(log(lik_A), log(lik_B_with_chain)), 4)
+) %>%
+  knitr::kable(caption = "Likelihood summary for the example household")
+```
+
+The **MCMC** finds the value of $q$ (and $\beta_{Ct}$, $Y_{hk}$, $T_{hk}$, $a_k$) that maximises the total log-likelihood across all 93 households — treating all these quantities jointly.
+
+------------------------------------------------------------------------
+
+## Appendix — the escape probability formula in full
+
+For a susceptible contact $i$ of age $a_i$, the cumulative escape probability at the end of day $t$ is:
+
+$$E_i(t) = \prod_{s=1}^{t}
+\underbrace{(1 - p_\text{bg})}_{\text{community}}
+\cdot
+\underbrace{\prod_{j\,:\,\text{infectious on day }s}(1 - q_h \cdot C_{a_i,\, a_j})}_{\text{household infectors}}$$
+
+where:
+
+- $q_h = q \cdot \exp(\beta_{Ct} \cdot (\bar{Ct} - Ct_h))$ — per-household transmission prob., scaled by index viral load
+- $C_{a_i,\, a_j}$ — daily home contacts between age groups $a_i$ and $a_j$ (Prem et al. 2021)
+- "infectious on day $s$" means:
+  - **Index**: days $1$ to $\max(0,\, D - \tau)$
+  - **Observed infected contact** $j$: days $t_j$ to $t_j + D - 1$ (where $t_j$ = `timetoinf_j`)
+  - **Missing infected member** $k$: days $T_{hk}$ to $T_{hk} + D - 1$ (latent, sampled in MCMC)

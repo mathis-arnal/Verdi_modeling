@@ -1,0 +1,544 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+## Quarto
+
+```{r}
+library(dplyr)
+library(stringr)
+library(naniar) 
+
+
+dataset_freezed2Nov25 <- read.csv("../data/dataset_freezed2Nov25.csv")
+
+dataset_freezed2Nov25 <- dataset_freezed2Nov25 %>% 
+  mutate(age_cat = case_when(
+      age <= 18 ~ "Child",
+      age < 60 ~  "Adult",
+      TRUE ~ "Elderly" 
+    ),
+    index_child = case_when(
+      index_child == 1 ~ "Index case age < 18 years",
+      index_child == 0 ~ "Index case age > 18 years"
+    )
+    # ,mask_ind = case_when(
+    #   mask_ind == 1 ~ "Yes, n(%)",
+    #   mask_ind == 0 ~ "No, n(%)"
+    # ),
+    # mask_mem = case_when(
+    #   mask_mem == 1 ~ "Yes, n(%)",
+    #   mask_mem == 0 ~ "No, n(%)"
+    # ),
+    # sepbed = case_when(
+    #   sepbed == 1 ~ "Yes, n(%)",
+    #   sepbed == 0 ~ "No, n(%)"
+    # ),
+     # Number of bedrooms
+    # bedroom_cat = case_when(
+    #   bedroom_num == "1" ~ "1 room, n(%)",
+    #   bedroom_num == "2" ~ "2 rooms, n(%)",
+    #   bedroom_num == "3" ~ "3 rooms, n(%)",
+    #   bedroom_num == "4" ~ "4 rooms, n(%)",
+    #   bedroom_num == "5" ~ "5 rooms, n(%)",
+    #   bedroom_num == "6" ~ "6 rooms, n(%)",
+    #   bedroom_num == "7" ~ "7 rooms, n(%)",
+    # ),    
+    # Number of bathrooms
+    # toiletcat = case_when(
+    #   toilet_num == "1" ~ "1 room, n(%)",
+    #   toilet_num == "2" ~ "2 rooms, n(%)",
+    #   toilet_num == "3" ~ "3 rooms, n(%)",
+    #   toilet_num == "4" ~ "4 rooms, n(%)",
+    #   toilet_num == "5" ~ "5 rooms, n(%)"
+    # )
+    ) %>% 
+  group_by(hhid) %>%
+  # Apply the value to the whole family
+  mutate(exclude_mem = exclude_mem[index == 1][1]) %>%
+  ungroup()
+
+
+HH_var <- c("index_child",'household_size',"household_sizemorethan4",'total_inhouse',
+                 "include_all_members",'bedroom_num', 'toilet_num',
+                 'separate_bed',"wash_sink",'ven_aircon', "openaircond",
+                 "havepet","toilet_cat" ,"bedroom_cat", "mask_mem", "include_all_members")
+contact_var <- c("sex", "age", "age_cat","edu"," relatetoindex","hazbmi_cat",
+"condition_hypertension","  condition_kidney_disease","condition_diabetes",
+"smoking","total_vac_cat","vac_cat","latest_vac_cat","period_vac_cat",
+"everinf","mask_mem","result_IgG_day1_mod",
+                 "result_IgM_day1_mod")
+
+# take off useless variables
+
+
+
+```
+
+# Look at missing data in index df
+
+```{r}
+
+# Remove columns with only NA
+
+index_col <- c("pid","hhid","index","index_child","day1_date","sex","age","age_cat","edu","hazbmi_cat","symptom","total_vac_cat","vac_cat","latest_vac_cat","period_vac_cat","mask_ind","sepbed","lineagecat","ngene_day1","ngene_d1_cat","sgene_day1","sgene_d1_cat","include_all_members","household_size","exclude_mem")
+
+index_df <- dataset_freezed2Nov25 %>% 
+  filter(index == "1") %>% 
+  select(all_of(index_col))
+
+index_df <- index_df %>% 
+  mutate(edu = ifelse(index_child=="Index case age < 18 years", "Child", edu))
+
+
+gg_miss_var(index_df, show_pct = TRUE)
+
+```
+
+Almost no data is missing there !
+
+# Improving estimation of household transmission
+
+1)**Exclude the Households with multiple index cases (15 households): The Multiple chains of transmissions makes it too complex to infer the SAR.**
+
+How can we know if the household had multiple index cases ?
+
+## **2) Imputation of status of individual excluded members**
+
+La il faut regarder pour les membres exclus les caracteristiques du reste pour deviner l'age et le sexe.
+
+Imputation de données manquantes au sein d'une structure hiérarchique (individus nichés dans des foyers)
+
+Let's start with imputation from age and sex.
+
+```{r}
+
+```
+
+### Contruct imputation df
+
+we construct the imputation dataframe with the variables we will use in our model.
+
+```{r}
+
+imputation_df <- dataset_freezed2Nov25 %>%
+  group_by(hhid) %>%
+  mutate(age_index = age_cat[index == 1],
+         n_observed_contacts    = household_size - (exclude_mem +1),
+         prop_infected_contacts = sum(result_infected[index == 0] == "Detected",
+                                      na.rm = TRUE)/n_observed_contacts,
+         n_infected_contacts    = sum(result_infected[index == 0] == "Detected", na.rm = TRUE),
+    n_missing_contacts     = exclude_mem,
+    # Crowding proxy
+    #persons_per_room       = household_size / bedroom_num)
+    age_mean   = mean(age, na.rm = TRUE),
+    age_min     = min(age, na.rm = TRUE),
+    age_max    = max(age, na.rm = TRUE),
+    female_prop       = mean(sex == "Female", na.rm = TRUE),
+    adult_nb        = sum(age >= 18, na.rm = TRUE),
+    child_nb        = sum(age < 18, na.rm = TRUE),
+    elderly_nb      = sum(age >= 60, na.rm = TRUE)
+  ) %>% 
+  select(hhid,age_index,n_observed_contacts, prop_infected_contacts, n_infected_contacts, n_missing_contacts, age_mean, age_min, age_max, adult_nb, child_nb,elderly_nb) %>% 
+  distinct()
+
+
+  
+```
+
+## Create the df for included members
+
+```{r}
+included_members_df <- df %>%
+  select(hhid, index, age_cat, result_infected, household_size, exclude_mem) %>% 
+  mutate(statut = "included")
+
+included_members_df <- left_join(included_members_df, imputation_df, by = "hhid")
+
+```
+
+## Create the rows for the excluded members
+
+```{r}
+# Identify households with excluded members
+hh_excluded <- dataset_freezed2Nov25 %>%
+  group_by(hhid) %>%
+  slice(1) %>%                          # one row per household
+  ungroup() %>%
+  filter(exclude_mem > 0) %>%
+  select(hhid, exclude_mem,
+         household_size)                   # adapt to your actual column names
+
+# Create one new row per excluded member
+new_rows <- hh_excluded %>%
+  rowwise() %>%
+  reframe(
+    hhid            = hhid,
+    pid             = seq_len(exclude_mem), # temporary IDs
+    index = 0,
+    age_cat       = NA_character_,
+    result_infected       = NA_character_,
+    household_size    = household_size,
+    exclude_mem = exclude_mem,
+    statut          = "missing",
+  ) %>% select(-pid)
+
+excluded_members_df <- left_join(new_rows, imputation_df, by = "hhid")
+
+```
+
+```{r}
+full_data <- rbind(included_members_df, excluded_members_df)
+```
+
+### Train the data on only complete household
+
+```{r}
+complete_HH <- dataset_freezed2Nov25 %>% 
+  select("hhid","include_all_members") %>% 
+  filter(include_all_members == "All members included") %>% 
+  pull(hhid)
+
+train_data <- full_data %>% 
+  filter(hhid %in% complete_HH,
+         statut == "included") %>% 
+  mutate(age_cat = as.factor(age_cat)) %>% 
+  group_by(hhid) %>% 
+  mutate(
+    child_nb_loo    = child_nb   - (age_cat == "Child"),
+    adult_nb_loo    = adult_nb   - (age_cat == "Adult"),
+    elderly_nb_loo  = elderly_nb - (age_cat == "Elderly")
+  ) %>%
+  ungroup()
+```
+
+```{r}
+
+age_weights <- c(
+  "Adult" = nrow(train_data) / (3 * sum(train_data$age_cat == "Adult")),
+  "Child" = nrow(train_data) / (3 * sum(train_data$age_cat == "Child")),
+  "Elderly" = nrow(train_data) / (3 * sum(train_data$age_cat == "Elderly"))
+)
+
+library(randomForest)
+
+model_age_group <- randomForest(
+  age_cat ~ child_nb_loo + adult_nb_loo + elderly_nb_loo  + household_size,
+  data      = train_data,
+  ntree     = 500,
+  classwt = age_weights,
+  importance = TRUE
+)
+
+```
+
+```{r}
+print(model_age_group)
+```
+
+Without class weight, we find an error rate of 0.11, which is great news ! We are quite efficient into knowing the age of our missing people.
+
+With class weight it upgrade to 18%, but we nay have a model more suited to the reality.
+
+# Train the data to predict infection on complete HH
+
+Let's prepare the data first
+
+```{r}
+train_infection <- full_data %>%
+  filter(hhid %in% complete_HH,
+         hhid != "1",
+         statut == "included",
+         index == 0) %>%
+  mutate(
+  result_infected = ifelse(result_infected == "Detected",1,0),
+  result_infected = as.factor(result_infected),
+  age_cat = as.factor(age_cat)) %>% 
+  group_by(hhid) %>%
+  mutate(
+    # Exclude current member from infection summaries
+    n_infected_loo = n_infected_contacts - (result_infected == "Detected"),
+    n_observed_loo = n_observed_contacts - 1,
+    prop_infected_loo = if_else(
+      n_observed_loo > 0,
+      n_infected_loo / n_observed_loo,
+      0),
+    child_nb_loo    = child_nb   - (age_cat == "Child"),
+    adult_nb_loo    = adult_nb   - (age_cat == "Adult"),
+    elderly_nb_loo  = elderly_nb - (age_cat == "Elderly"),
+    result_infected = as.factor(result_infected)
+  ) %>%
+  ungroup() 
+      
+
+```
+
+Random Forest with class weights
+
+```{r}
+library(broom)
+
+# Add a class weight to balance 
+class_weights <- c(
+  "0" = nrow(train_infection) / (2 * sum(train_infection$result_infected == 0)),
+  "1" = nrow(train_infection) / (2 * sum(train_infection$result_infected == 1))
+)
+
+model_infection <- randomForest(
+  factor(result_infected) ~ age_cat + age_index + n_infected_loo + n_observed_loo +
+    prop_infected_loo,
+  data   = train_infection,
+  ntree = 500,
+  classwt    = class_weights,
+  importance = TRUE
+)
+
+```
+
+```{r}
+print(model_infection)
+```
+
+Error rate de 10 % juste avec un random forest, en vrai c'est ok, essayons de le rendre plus parcimonieux :
+
+```{r}
+model_infection_p <- randomForest(
+  factor(result_infected) ~ age_cat  +
+    prop_infected_loo,
+  data   = train_infection,
+  ntree = 500,
+  classwt    = class_weights,
+  importance = TRUE
+)
+
+print(model_infection_p)
+```
+
+Ce modele a 9% d'error rate, alors que c'est juste avec 2 parametres !
+
+I need to treat all my missing members jointly
+
+# Sequential iteration
+
+Let's try to apply the sequential iteration
+
+```{r}
+# ============================================================
+# STEP 2 : Construire les variables CORRIGÉES pour l'imputation
+# incluant les manquants dans le dénominateur
+# ============================================================
+
+# Pour chaque membre manquant à imputer, les predicteurs
+# doivent refléter la composition OBSERVÉE + déjà imputés
+
+impute_age_sequential <- function(hhid_target, data, model_age) {
+  
+  famille <- data %>% filter(hhid == hhid_target)
+  n_manquants <- first(famille$household_size) - nrow(famille)
+  print("Nombre d'habitant manquants: ", n_manquants)
+  print(n_manquants)
+  ages_imputed <- c()
+  
+  for (vague in 1:n_manquants) {
+    # Recalculer les _loo en intégrant les déjà imputés
+    child_so_far   <- sum(famille$age_cat == "Child",   na.rm = TRUE) +
+                      sum(ages_imputed == "Child")
+    adult_so_far   <- sum(famille$age_cat == "Adult",   na.rm = TRUE) +
+                      sum(ages_imputed == "Adult")
+    elderly_so_far <- sum(famille$age_cat == "Elderly", na.rm = TRUE) +
+                      sum(ages_imputed == "Elderly")
+    
+    # Ligne fictive pour le membre manquant à imputer
+    new_member <- data.frame(
+      child_nb_loo   = child_so_far,    # exclut le membre cible (LOO)
+      adult_nb_loo   = adult_so_far,
+      elderly_nb_loo = elderly_so_far,
+      household_size = first(famille$household_size)
+    )
+    
+    # Prédire l'âge
+    age_pred <- predict(model_age, newdata = new_member)
+    ages_imputed <- c(ages_imputed, as.character(age_pred))
+    
+    cat(sprintf("Famille %s | Vague %d : age imputé = %s\n",
+                hhid_target, vague, age_pred))
+  }
+  
+  return(ages_imputed)
+}
+
+# ============================================================
+# STEP 3 : Appliquer à toutes les 57 familles
+# ============================================================
+
+
+```
+
+```{r}
+
+#impute_age_sequential(8, dataset_freezed2Nov25, model_age = model_age_group)
+
+
+results_imputation <- lapply(famille_summary$hhid, function(id) {
+  ages <- impute_age_sequential(id, dataset_freezed2Nov25, model_age_group)
+  data.frame(hhid = id, age_cat = ages, 
+             vague = seq_along(ages))
+}) %>% bind_rows()
+
+print(results_imputation)
+```
+
+### Let's try to plot the distribution to see if it makes sense
+
+```{r}
+library(ggplot2)
+
+observed_age <- dataset_freezed2Nov25 %>% 
+  select(hhid, age_cat) %>% 
+  mutate(source = "observed")
+
+imputed_age <- results_imputation %>% 
+  select(hhid, age_cat) %>% 
+  mutate( source = "imputed")
+
+p <- bind_rows(observed_age, imputed_age) %>%
+  count(age_cat, source) %>% 
+  group_by(source) %>%
+  mutate(prop = n / sum(n)) %>%   # proportions pour comparaison équitable
+  ggplot(aes(x = age_cat, y = prop, fill = source)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.85) +
+  geom_text(aes(label = scales::percent(prop, accuracy = 1)),
+            position = position_dodge(width = 0.9),
+            vjust = -0.4, size = 3.5) +
+  scale_fill_manual(values = c("observed" = "#457B9D", "imputed" = "#E63946")) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title    = " age_cat distribution : Observed vs Imputed",
+    subtitle = paste0("n observed = ", nrow(observed_age),
+                      " | n imputed = ", nrow(imputed_age)),
+    x        = "Age category",
+    y        = "Proportion",
+    fill     = "Source"
+  ) +
+  theme_minimal(base_size = 13)
+
+p
+```
+
+My model has tendencies to give more adults, even with weighted class. It would be time to add a household structure if possible to the model .
+
+# TEST
+
+### Essayons avec une loi poisson
+
+On peut essayer les memes stats que Patumrat, a savoir une log link function
+
+```{r}
+model_infection_poisson <- glm(
+  result_infected ~ age_cat  + n_infected_loo + n_observed_loo +
+    prop_infected_loo,
+  data   = train_infection,
+  family = poisson(link = "log")
+)
+```
+
+```{r}
+summary(model_infection_poisson)
+```
+
+```{r}
+library(caret)
+
+# Verify
+levels(train_infection$result_infected)
+# Should be: "No" "Yes"
+
+# Then rerun
+model_cv <- train(
+  result_infected ~ age_cat + prop_infected_loo,
+  data      = train_infection,
+  method    = "glm",
+  family    = binomial(link = "logit"),
+  trControl = ctrl,
+  metric    = "ROC"
+)
+
+
+
+summary(model_cv)
+```
+
+# 
+
+# Let's try with mice
+
+```{r}
+library("mice")
+# Columns to use in the imputation model
+cols_for_imputation <- c(
+  # Variables to impute
+  "age_cat",
+  "result_infected",
+  
+  # Predictors for age_cat (mirrors model_age_group)
+  "age_index",
+  "household_size",        # OR the nb_ components — not both
+  "child_nb_loo",          # remove if keeping household_size
+  "adult_nb_loo",
+  "elderly_nb_loo",
+  
+  # Predictors for result_infected (mirrors model_infection_p)
+  "prop_infected_loo"
+  
+)
+
+train_imp <- train_infection[, cols_for_imputation]
+
+
+# Tell mice: when imputing age_cat, use exactly these predictors
+pred_matrix <- make.predictorMatrix(train_imp)
+
+# Zero out everything for age_cat row first
+pred_matrix["age_cat", ] <- 0
+
+# Then allow only the same vars your RF used
+pred_matrix["age_cat", c("child_nb_loo", "adult_nb_loo", 
+                          "elderly_nb_loo", "age_index", 
+                          "household_size")] <- 1
+
+
+# Use your full training data (including result_infected for imputation)
+imp <- mice(
+  train_imp,
+  m               = 20,
+  method          = "pmm",
+  predictorMatrix = pred_matrix,
+  maxit           = 10,
+  seed            = 123,
+  printFlag       = FALSE
+)
+
+complete(imp)
+```
+
+```{r}
+famille_summary <- full_data %>%
+  filter( statut == "included") %>% 
+  group_by(hhid) %>%
+  summarise(
+    n_observed_contacts    = n(),
+    n_missing_contacts   = first(n_missing_contacts),
+    child_obs     = sum(age_cat == "Child",   na.rm = TRUE),
+    adult_obs     = sum(age_cat == "Adult",   na.rm = TRUE),
+    elderly_obs   = sum(age_cat == "Elderly", na.rm = TRUE),
+    age_index     = first(age_index),
+    household_size = first(household_size)
+  ) %>%
+  filter(n_missing_contacts > 0)
+
+cat("Familles avec membres manquants :", nrow(famille_summary), "\n")
+cat("Distribution du nb de manquants :\n")
+print(table(famille_summary$n_missing_contacts))
+```

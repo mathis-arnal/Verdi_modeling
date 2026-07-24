@@ -1,0 +1,296 @@
+---
+title: "Sensitivity analyses"
+subtitle: "VERDI household SARS-CoV-2 transmission model"
+format: html
+editor: visual
+---
+
+# Overview
+
+Systematic comparison of the corrected SAR and posterior of $q$ across all planned
+sensitivity scenarios. Each scenario re-runs the same MCMC sampler with one assumption
+changed. Results are cached to `results/` so re-rendering is fast after the first run.
+
+**Scenarios covered:**
+
+| ID | Description | What changes |
+|---|---|---|
+| `primary` | Baseline (τ=2, Prem 2021 matrix) | — |
+| `tau1` | Pre-enrollment window τ=1 | `build_hh_list(tau=1)` |
+| `tau3` | Pre-enrollment window τ=3 | `build_hh_list(tau=3)` |
+| `naive` | Age-naive (no contact matrix) | `C_mat` = all-ones |
+| `gamma05` | Density-dependent contacts γ=0.5 | `C_mat` scaled per household |
+| `gamma10` | Frequency-dependent contacts γ=1.0 | `C_mat` scaled per household |
+
+------------------------------------------------------------------------
+
+# Setup
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(haven)
+
+source("R/model_functions.R")
+
+set.seed(2024)
+
+N_ITER   <- 10000
+N_BURNIN <- 2000
+N_THIN   <- 5
+```
+
+------------------------------------------------------------------------
+
+# Shared data (loaded once)
+
+```{r}
+# ── Study dataset ────────────────────────────────────────────────────────────
+dataset <- read.csv("data/dataset_freezed2Nov25.csv") %>%
+  mutate(
+    age_cat = factor(
+      case_when(age <= 17 ~ "Child", age < 60 ~ "Adult", TRUE ~ "Elderly"),
+      levels = c("Child", "Adult", "Elderly")
+    ),
+    infected_bin = as.integer(result_infected == "Detected")
+  ) %>%
+  group_by(hhid) %>%
+  mutate(exclude_mem = exclude_mem[index == 1][1]) %>%
+  ungroup()
+
+n_obs_contacts  <- sum(dataset$index == 0 & !is.na(dataset$infected_bin))
+n_obs_infected  <- sum(dataset$index == 0 & dataset$result_infected == "Detected",
+                       na.rm = TRUE)
+n_total_missing <- sum(dataset$exclude_mem[dataset$index == 1], na.rm = TRUE)
+
+cat("Observed contacts:", n_obs_contacts,
+    "| Observed infected:", n_obs_infected,
+    "| Total missing:", n_total_missing, "\n")
+
+# ── MICS comp_table (used for all scenarios) ─────────────────────────────────
+hl      <- read_sav("Thailand MICS6 2022 SPSS Datasets/hl.sav")
+hh_mics <- read_sav("Thailand MICS6 2022 SPSS Datasets/hh.sav")
+
+comp_table <- hl %>%
+  filter(HH7A == 50) %>%
+  mutate(is_child = HL6 <= 17, is_adult = HL6 >= 18 & HL6 <= 59,
+         is_elderly = HL6 >= 60) %>%
+  group_by(HH1, HH2) %>%
+  summarise(household_size = n(), n_child = sum(is_child),
+            n_adult = sum(is_adult), n_elderly = sum(is_elderly),
+            .groups = "drop") %>%
+  filter(household_size > 1, n_child > 0) %>%
+  group_by(household_size, n_child, n_adult, n_elderly) %>%
+  summarise(count = n(), .groups = "drop")
+
+# ── Prem 2021 home contact matrix for Thailand ───────────────────────────────
+prem_cache <- "data/contact_home.rdata"
+if (!file.exists(prem_cache)) {
+  download.file(
+    paste0("https://raw.githubusercontent.com/kieshaprem/",
+           "synthetic-contact-matrices/master/output/",
+           "syntheticmatrices/contact_home.rdata"),
+    prem_cache, mode = "wb", quiet = TRUE
+  )
+}
+load(prem_cache)
+
+child_bands   <- 1:4; adult_bands <- 5:12; elderly_bands <- 13:16
+groups <- list(Child = child_bands, Adult = adult_bands, Elderly = elderly_bands)
+
+C_prem <- matrix(0, 3, 3, dimnames = list(names(groups), names(groups)))
+for (a in names(groups))
+  for (b in names(groups))
+    C_prem[a, b] <- mean(rowSums(contact_home[["THA"]][groups[[a]], groups[[b]],
+                                                        drop = FALSE]))
+
+cat("Prem 2021 home matrix for Thailand:\n")
+print(round(C_prem, 3))
+
+# ── Omicron Gamma infectiousness profile ─────────────────────────────────────
+mu_GT  <- 3.3; sd_GT  <- 1.5
+shape  <- mu_GT^2 / sd_GT^2
+rate   <- mu_GT / sd_GT^2
+D_max  <- 14
+f_raw  <- diff(pgamma(0:D_max, shape = shape, rate = rate))
+f_prof <- f_raw / sum(f_raw)
+```
+
+------------------------------------------------------------------------
+
+# Helper: run one scenario with caching
+
+```{r}
+run_scenario <- function(id, hh_list, mics_priors, C_mat,
+                          n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = N_THIN) {
+  cache <- sprintf("results/mcmc_%s.rds", id)
+  if (file.exists(cache)) {
+    cat(sprintf("[%s] loading cache\n", id))
+    return(readRDS(cache))
+  }
+  cat(sprintf("[%s] running MCMC (%d iterations)...\n", id, n_iter))
+  res <- run_mcmc(hh_list, mics_priors, C_mat,
+                  n_iter = n_iter, n_burnin = n_burnin, n_thin = n_thin,
+                  f_prof = f_prof)
+  saveRDS(res, cache)
+  res
+}
+
+# Summarise a result list into a one-row data frame.
+summarise_scenario <- function(id, label, res) {
+  sar <- (n_obs_infected + res$E_miss_infected) / (n_obs_contacts + n_total_missing)
+  data.frame(
+    id        = id,
+    label     = label,
+    q_med     = median(res$q_chain),
+    q_lo      = quantile(res$q_chain, 0.025),
+    q_hi      = quantile(res$q_chain, 0.975),
+    sar_med   = median(sar) * 100,
+    sar_lo    = quantile(sar, 0.025) * 100,
+    sar_hi    = quantile(sar, 0.975) * 100,
+    stringsAsFactors = FALSE
+  )
+}
+```
+
+------------------------------------------------------------------------
+
+# Scenario 1 — Primary (τ=2, Prem matrix)
+
+Load from the cache written by `chain_binomial_mcmc.qmd`. If it does not exist yet,
+run the primary analysis here.
+
+```{r}
+hh_primary    <- build_hh_list(dataset, tau = 2)
+mics_primary  <- compute_mics_priors(hh_primary, comp_table, dataset)
+res_primary   <- run_scenario("primary", hh_primary, mics_primary, C_prem)
+```
+
+------------------------------------------------------------------------
+
+# Scenario 2 — τ sensitivity (τ=1 and τ=3)
+
+Tests sensitivity to the assumed index pre-enrollment infectious period.
+τ=1: faster detection (same day as symptom onset).
+τ=3: upper limit allowed by the 48-hour enrollment criterion.
+
+```{r}
+hh_tau1   <- build_hh_list(dataset, tau = 1)
+hh_tau3   <- build_hh_list(dataset, tau = 3)
+mics_tau1 <- compute_mics_priors(hh_tau1, comp_table, dataset)
+mics_tau3 <- compute_mics_priors(hh_tau3, comp_table, dataset)
+
+res_tau1 <- run_scenario("tau1", hh_tau1, mics_tau1, C_prem)
+res_tau3 <- run_scenario("tau3", hh_tau3, mics_tau3, C_prem)
+```
+
+------------------------------------------------------------------------
+
+# Scenario 3 — Age-naive model (no contact matrix)
+
+Replaces C_prem with a constant-1 matrix so every age pair has the same weight.
+Tests whether the age structure from Prem et al. materially affects the corrected SAR.
+If results are similar to the primary analysis, the contact matrix assumption is not
+driving conclusions.
+
+```{r}
+C_naive <- matrix(1, 3, 3, dimnames = list(AGE_CATS, AGE_CATS))
+
+res_naive <- run_scenario("naive", hh_primary, mics_primary, C_naive)
+```
+
+------------------------------------------------------------------------
+
+# Scenario 4 — Density-dependent contacts (γ=0.5 and γ=1.0)
+
+Implements the correction suggested by Goeyvaerts et al. (2018): within-household
+contact density decreases with household size.  The effective contact matrix for
+household h becomes C_prem / n_h^γ.
+
+γ=0 is the current model (density-independent, no scaling).
+γ=0.5 is an intermediate correction.
+γ=1.0 is fully frequency-dependent (equivalent to Cauchemez's β/n formulation).
+
+This requires building per-household scaled matrices inside the MCMC.  The cleanest
+implementation wraps the standard run_mcmc with a pre-scaled hh_list: for each
+household, divide C_mat by n_h^γ and pass the result as C_mat.  Because run_mcmc
+takes a single C_mat, a small wrapper creates household-specific lists.
+
+```{r}
+# Helper: run the model with per-household contact matrix scaling.
+# For each household, the effective contact matrix is C_mat / n_h^gamma.
+# This is a lightweight wrapper: it creates n_h-specific C_mat copies and
+# modifies the household list so each household carries its own scaled matrix.
+# NOTE: requires a modified likelihood that accepts per-household C_mat.
+# TODO: implement run_mcmc_density() that accepts a named list C_mat_list
+#       keyed by hhid, or add gamma as a direct argument to run_mcmc.
+
+# Placeholder — replace with the density-aware MCMC call when implemented.
+# res_gamma05 <- run_scenario_density("gamma05", hh_primary, mics_primary,
+#                                      C_prem, gamma = 0.5)
+# res_gamma10 <- run_scenario_density("gamma10", hh_primary, mics_primary,
+#                                      C_prem, gamma = 1.0)
+
+cat("Density-dependent scenarios not yet implemented — see TODO above.\n")
+```
+
+------------------------------------------------------------------------
+
+# Results: comparison table
+
+```{r}
+results <- bind_rows(
+  summarise_scenario("primary", "Primary (τ=2, Prem)",    res_primary),
+  summarise_scenario("tau1",    "τ = 1",                  res_tau1),
+  summarise_scenario("tau3",    "τ = 3",                  res_tau3),
+  summarise_scenario("naive",   "Age-naive (C = 1)",      res_naive)
+  # Add density-dependent rows here once implemented:
+  # summarise_scenario("gamma05", "Density γ = 0.5",      res_gamma05),
+  # summarise_scenario("gamma10", "Density γ = 1.0",      res_gamma10)
+)
+
+knitr::kable(
+  results %>%
+    select(label, q_med, q_lo, q_hi, sar_med, sar_lo, sar_hi) %>%
+    mutate(across(where(is.numeric), \(x) round(x, 3))),
+  col.names = c("Scenario", "q median", "q 2.5%", "q 97.5%",
+                "SAR % median", "SAR % 2.5%", "SAR % 97.5%"),
+  caption = "Posterior summaries across sensitivity scenarios."
+)
+```
+
+------------------------------------------------------------------------
+
+# Results: forest plot
+
+```{r fig.width=8, fig.height=5}
+results$label <- factor(results$label, levels = rev(results$label))
+
+ggplot(results, aes(x = sar_med, y = label)) +
+  geom_point(size = 3, colour = "#457B9D") +
+  geom_errorbarh(aes(xmin = sar_lo, xmax = sar_hi),
+                 height = 0.25, colour = "#457B9D") +
+  geom_vline(xintercept = results$sar_med[results$id == "primary"],
+             linetype = "dashed", colour = "#E63946", linewidth = 0.6) +
+  labs(title    = "Corrected SAR — sensitivity analysis",
+       subtitle = "Dashed line = primary estimate",
+       x = "Corrected individual-level SAR (%)",
+       y = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(panel.grid.major.y = element_blank())
+```
+
+```{r fig.width=8, fig.height=5}
+ggplot(results, aes(x = q_med, y = label)) +
+  geom_point(size = 3, colour = "#2a9d8f") +
+  geom_errorbarh(aes(xmin = q_lo, xmax = q_hi),
+                 height = 0.25, colour = "#2a9d8f") +
+  geom_vline(xintercept = results$q_med[results$id == "primary"],
+             linetype = "dashed", colour = "#E63946", linewidth = 0.6) +
+  labs(title    = "Posterior of q — sensitivity analysis",
+       subtitle = "Dashed line = primary estimate",
+       x = "q (per-contact-per-day transmission probability)",
+       y = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(panel.grid.major.y = element_blank())
+```

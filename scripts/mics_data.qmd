@@ -1,0 +1,290 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+# Unicef Mics data
+
+First, we look at the household members data , named hl .
+
+```{r}
+library(haven)
+hl <- read_sav("../Thailand MICS6 2022 SPSS Datasets/hl.sav")
+
+summary_hl <- look_for(hl)
+```
+
+```{r}
+library(haven)
+library(dplyr)
+
+
+# Household composition
+hl_summary <- hl %>%
+  #Select only Chiang Mai families
+  filter(HH7A == 50) %>%
+  mutate(
+    is_child   = HL6 >= 0  & HL6 <= 17,
+    is_adult   = HL6 >= 18 & HL6 <= 59,
+    is_elderly = HL6 >= 60
+  ) %>%
+  group_by(HH1,HH2) %>%
+  summarise(
+    household_size = n(),
+    n_child     = sum(is_child,   na.rm = TRUE),
+    n_adult       = sum(is_adult,   na.rm = TRUE),
+    n_elderly      = sum(is_elderly, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+summary(hl)
+
+# Weighted frequency for each composition cell
+
+
+```
+
+### Look at HH variables
+
+let's look at the complete households, we check if it is the same value as computed in hl_summary
+
+```{r}
+hh <- read_sav("../Thailand MICS6 2022 SPSS Datasets/hh.sav")
+
+summary_hh <- look_for(hh)
+
+complete_hh <- hh %>%
+  #Select only Chiang Mai families
+  filter(HH7A == 50) %>%
+  # Let's have a look at the household size
+  select(HH1,HH2,HH48,hhweight) %>% 
+  # DROP the na
+  filter(!is.na(HH48))
+
+complete_df <- hl_summary %>% 
+  left_join(complete_hh, by=c("HH1","HH2")) %>% 
+  mutate(same_value_size = household_size==HH48)
+```
+
+The values are consistent, we can then trust them :)
+
+### Adapt the data to our study
+
+We need to have at least one child, at least 2 people in the house.
+
+```{r}
+complete_df <- complete_df %>% 
+  filter(household_size > 1,
+         n_child >0)
+
+comp_table <- complete_df %>%
+  group_by(household_size, n_child, n_adult, n_elderly) %>%
+  summarise(
+    count      = n())
+```
+
+# Hot Deck Imputation
+
+### find_donors function
+
+find a potential donor based on household size, and the observed member in the family.
+
+```{r}
+find_donors <- function(obs_child, obs_adult, obs_elderly, 
+                        hh_size,donor_pool) {
+  
+  donor_pool %>%
+    filter(
+      household_size == hh_size,
+      n_child   >= obs_child,
+      n_adult   >= obs_adult,
+      n_elderly >= obs_elderly
+    ) %>% 
+    mutate(freq = count / sum(count))
+}
+
+donors <- find_donors(1,2,1,6,comp_table)
+
+```
+
+### draw_donor function
+
+Out of all the possible donors, pool one based on the freq out each household composition.
+
+```{r}
+draw_donor <- function(donors) {
+  
+  if (nrow(donors) == 0) return(NULL)
+  
+  # Weighted random draw
+  idx <- sample(
+    nrow(donors),
+    size = 1,
+    prob = donors$freq
+  )
+  
+  donors[idx,c("household_size",'n_child','n_adult','n_elderly')]
+}
+
+pooled_donor <- draw_donor(donors)
+
+# Imputed missing counts
+c(
+  child_imputed  = pooled_donor$n_child   - 1,  # subtract observed
+  adult_imputed  = pooled_donor$n_adult   - 1,
+  elderly_imputed = pooled_donor$n_elderly - 0
+)
+```
+
+### multiple hot deck function
+
+We pool one donor for each incomplete household
+
+```{r}
+multiple_hot_deck <- function(incomplete_HH, donor_pool) {
+  
+  # Create an empty dataframe
+  all_imputation <- data.frame(
+    hhid = integer(),
+    household_size = integer(),
+    n_child = integer(),
+    n_adult = integer(),
+    n_elderly = integer(),
+    imp_child = integer(),
+    imp_adult = integer(),
+    imp_elderly = integer()
+    
+  )
+  
+  for (i in 1:nrow(incomplete_HH)) {
+    
+    # Find the potential donors for this set:
+    donors <- find_donors(
+      obs_child   = incomplete_HH$n_child[i],
+      obs_adult   = incomplete_HH$n_adult[i],
+      obs_elderly = incomplete_HH$n_elderly[i],
+      hh_size     = incomplete_HH$household_size[i],
+      donor_pool  = donor_pool
+    )
+    
+    # Pool the donor and compute imputation variable 
+    pooled_donor <- draw_donor(donors) 
+    
+    
+    # Deal with when there is no pool donor
+    if (is.null(pooled_donor)) {
+        pooled_donor <- data.frame(
+            hhid = incomplete_HH[i,]$hhid,
+            household_size = incomplete_HH[i,]$household_size,
+            n_child = NA,
+            n_adult = NA,
+            n_elderly = NA,
+            imp_child = NA,
+            imp_adult = NA,
+            imp_elderly = NA
+            
+          )
+    }
+    # Otherwise, we compute what has been imputed 
+    else {
+          pooled_donor <- pooled_donor %>% 
+      mutate(hhid = incomplete_HH[i,]$hhid,
+             imp_child = n_child - incomplete_HH[i,]$n_child,
+             imp_adult = n_adult - incomplete_HH[i,]$n_adult,
+             imp_elderly = n_elderly - incomplete_HH[i,]$n_elderly
+             )
+      
+    }
+  
+    
+  
+    all_imputation <- bind_rows(all_imputation,pooled_donor)
+  }
+
+  return(all_imputation)
+  
+  
+
+}
+
+```
+
+## Import the data from the study
+
+we look at all the incomplete hh from our study.
+
+```{r}
+library(dplyr)
+dataset_freezed2Nov25 <- read.csv("../data/dataset_freezed2Nov25.csv")
+
+all_HH <- dataset_freezed2Nov25 %>% 
+  mutate(age_cat = case_when(
+      age <= 18 ~ "Child",
+      age < 60 ~  "Adult",
+      TRUE ~ "Elderly" 
+    ),
+    ) %>% 
+  group_by(hhid) %>%
+  # Apply the value to the whole family
+  mutate(exclude_mem = exclude_mem[index == 1][1]) %>% 
+    group_by(hhid) %>%
+  mutate(
+    n_missing_contacts     = exclude_mem,
+    n_adult        = sum(age >= 18, na.rm = TRUE),
+    n_child        = sum(age < 18, na.rm = TRUE),
+    n_elderly      = sum(age >= 60, na.rm = TRUE)
+  ) %>% 
+  select(hhid,household_size, n_adult, n_child, n_elderly, n_missing_contacts)
+
+# Select our useful variables
+
+incomplete_HH <- all_hh %>% 
+  filter(n_missing_contacts > 0) %>% 
+  distinct()
+```
+
+### test on the incomplete data
+
+```{r}
+print(incomplete_HH[1,])
+mhd <- multiple_hot_deck(incomplete_HH, comp_table)
+```
+
+## validation on the complete households data
+
+### function to remove members
+
+first let's have a look at the household size distribution betwwen complete and incomplete hh
+
+```{r}
+library(ggplot2)
+
+all_HH %>%
+  distinct() %>% 
+  mutate(
+    group = ifelse(n_missing_contacts >0, "incomplete", "complete")) %>%
+  group_by(household_size,group) %>% 
+  mutate(count = n()) %>% 
+  group_by(group) %>% 
+  mutate(prop = count / n()) %>% 
+  ggplot(aes(x = household_size, y = prop, fill = group)) +
+  geom_col(position = "dodge") +
+  labs(title = "Household size distribution: complete vs incomplete")
+```
+
+We mainly have complete household of size 3, **The 34 complete household is not a good validation dataset for our problem .**
+
+# Infection imputation
+
+our idea was to use the infection state of other members, aswell as the age group, and possibly the contact matrix(by age).
+
+This is not a standard imputation problem — it is a probabilistic inference problem on a transmission network.
+
+We could :
+
+- create an exposure score to the disease, based on the infection state of the household.
+
+```{r}
+
+```

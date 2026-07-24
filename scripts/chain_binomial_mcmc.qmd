@@ -1,0 +1,392 @@
+---
+title: "Chain-binomial model with latent variable augmentation"
+format: html
+editor: visual
+---
+
+# Overview
+
+A discrete-time chain-binomial model for household SARS-CoV-2 transmission with:
+
+- **Age-stratified transmission probability** informed by the Thai home contact matrix
+- **Infection timing** — observed contacts' infection days (`timetoinf`) enter the likelihood; secondary-to-secondary transmission chains within households are modelled explicitly
+- **Latent variables for missing members**: infection indicator $Y_{hk}$, infection day $T_{hk}$, and age group $a_k$ — all updated via exact Gibbs steps within a single MCMC chain (data augmentation following Cauchemez et al. 2004; Walker, Ross & Black 2017)
+- **Background community hazard** $p_\text{bg}$ from phylogenetic analysis (12/40 community-acquired contacts over \~21 days)
+
+**Note on the index pre-enrollment period (**$\tau$): `timetoinf` is measured from enrollment, not from the index case's first infectious day. The index started being infectious $\tau$ days before enrollment; from day 1 of follow-up the index has $D - \tau$ remaining infectious days. Primary analysis uses $\tau = 2$ (Omicron: \~1 day presymptomatic + \~1 day to detection); sensitivity analysis at $\tau \in \{0, 1, 3\}$ is recommended.
+
+------------------------------------------------------------------------
+
+# Setup
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(haven)
+
+source("R/model_functions.R")
+
+set.seed(2024)
+
+# MCMC settings
+N_ITER   <- 1000
+N_BURNIN <- 200
+N_THIN   <- 5
+
+# Fixed biological parameters (Omicron)
+D_INFECTIOUS <- 5    # days infectious
+T_FOLLOW     <- 14   # observation window (days)
+TAU          <- 2    # index pre-enrollment infectious days; sensitivity: 0, 1, 3
+
+# Background daily community acquisition probability
+# From phylogenetic analysis: 12/40 community-acquired over ~21 days
+P_BG <- 0.003
+```
+
+------------------------------------------------------------------------
+
+# 1. Thai home contact matrix (Prem et al. 2021)
+
+Source: Prem K et al. *Projecting contact matrices in 177 geographical regions.* PLOS Computational Biology, 2021. https://doi.org/10.1371/journal.pcbi.1009098
+
+Data: https://github.com/kieshaprem/synthetic-contact-matrices
+
+We use the **home-setting** contact matrix for Thailand, aggregated from 5-year age bands (16 × 16) down to our three groups: Child (0–19), Adult (20–59), Elderly (60+).
+
+> **Age group approximation:** The study defines Child as ≤17 and Adult as 18–59. The Prem et al. bands are 5-year intervals, so we use 0–19 / 20–59 / 60+ as the closest tractable grouping. This adds at most 2 years of misclassification at each boundary and has negligible effect on the matrix values.
+
+```{r}
+prem_cache <- "data/contact_home.rdata"
+
+if (!file.exists(prem_cache)) {
+  prem_url <- paste0(
+    "https://raw.githubusercontent.com/kieshaprem/",
+    "synthetic-contact-matrices/master/output/",
+    "syntheticmatrices/contact_home.rdata"
+  )
+  download.file(prem_url, prem_cache, mode = "wb", quiet = TRUE)
+  message("Downloaded Prem et al. contact matrix and cached to data/")
+}
+
+load(prem_cache)          # defines: contact_home
+C_THA_full <- contact_home[["THA"]]
+cat("Full matrix dimensions:", dim(C_THA_full), "\n")
+```
+
+```{r}
+child_bands   <- 1:4    # ages  0–19
+adult_bands   <- 5:12   # ages 20–59
+elderly_bands <- 13:16  # ages 60+
+
+groups <- list(Child = child_bands, Adult = adult_bands, Elderly = elderly_bands)
+
+C_mat <- matrix(0, 3, 3,
+                dimnames = list(names(groups), names(groups)))
+
+for (a in names(groups))
+  for (b in names(groups))
+    C_mat[a, b] <- mean(rowSums(C_THA_full[groups[[a]], groups[[b]], drop = FALSE]))
+
+cat("Home contact matrix — Thailand (Prem et al. 2021), contacts per person per day:\n")
+print(round(C_mat, 3))
+```
+
+```{r}
+as.data.frame(as.table(C_mat)) %>%
+  rename(Susceptible = Var1, Infector = Var2, Contacts = Freq) %>%
+  ggplot(aes(x = Infector, y = Susceptible, fill = Contacts)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = round(Contacts, 2)), size = 5) +
+  scale_fill_gradient(low = "#dce9f5", high = "#1d5fa3") +
+  labs(title = "Thai home contact matrix (Prem et al. 2021)",
+       subtitle = "Aggregated to Child / Adult / Elderly") +
+  theme_minimal(base_size = 13)
+```
+
+------------------------------------------------------------------------
+
+# 2. Prepare household data
+
+Extracts per-household: index age group, enrolled contacts with age, infection outcome and `timetoinf`, and the count of non-enrolled members `n_missing`.
+
+```{r}
+dataset <- read.csv("data/dataset_freezed2Nov25.csv") %>%
+  mutate(
+    age_cat = factor(
+      case_when(age <= 17 ~ "Child", age < 60 ~ "Adult", TRUE ~ "Elderly"),
+      levels = c("Child", "Adult", "Elderly")
+    ),
+    infected_bin = as.integer(result_infected == "Detected")
+  ) %>%
+  group_by(hhid) %>%
+  mutate(exclude_mem = exclude_mem[index == 1][1]) %>%
+  ungroup()
+
+hh_list <- build_hh_list(dataset, tau = TAU)
+
+cat("Households:", length(hh_list), "\n")
+cat("Total observed contacts:",
+    sum(sapply(hh_list, function(h) nrow(h$contacts))), "\n")
+cat("Total missing members:",
+    sum(sapply(hh_list, function(h) h$n_missing)), "\n")
+```
+
+------------------------------------------------------------------------
+
+# 3. MICS hot-deck: impute age of missing members
+
+```{r}
+hl     <- read_sav("Thailand MICS6 2022 SPSS Datasets/hl.sav")
+hh_mics <- read_sav("Thailand MICS6 2022 SPSS Datasets/hh.sav")
+
+comp_table <- hl %>%
+  filter(HH7A == 50) %>%
+  mutate(is_child = HL6 <= 17, is_adult = HL6 >= 18 & HL6 <= 59,
+         is_elderly = HL6 >= 60) %>%
+  group_by(HH1, HH2) %>%
+  summarise(household_size = n(), n_child = sum(is_child),
+            n_adult = sum(is_adult), n_elderly = sum(is_elderly),
+            .groups = "drop") %>%
+  left_join(hh_mics %>% filter(HH7A == 50) %>% select(HH1, HH2, HH48),
+            by = c("HH1", "HH2")) %>%
+  filter(household_size > 1, n_child > 0) %>%
+  group_by(household_size, n_child, n_adult, n_elderly) %>%
+  summarise(count = n(), .groups = "drop")
+
+```
+
+# 3. Infectiousness Profile
+
+```{r}
+# Omicron generation time: Gamma(shape, rate)
+mu_GT  <- 3.3          # mean (days)
+sd_GT  <- 1.5          # SD (days)
+shape  <- mu_GT^2 / sd_GT^2   # = 4.84
+rate   <- mu_GT / sd_GT^2     # = 1.47
+
+# Discretize: probability that GT falls in each day-interval [t-1, t)
+D_max  <- 14
+f_raw  <- diff(pgamma(0:D_max, shape = shape, rate = rate))
+f_prof <- f_raw / sum(f_raw)   # normalize to sum to 1
+
+# f_prof[t] = P(GT in [t-1, t]): probability mass for interval [t-1, t].
+# The natural midpoint of that interval is t - 0.5, so bars are drawn there.
+# The continuous density evaluated at midpoints then sits exactly on the bars.
+plot((1:D_max) - 0.5, f_prof, type = "h",
+     xlab = "Days since infection", ylab = "Relative infectiousness",
+     main = "Omicron infectiousness profile (Gamma, mean=3.3d)",
+     lwd = 2, col = "steelblue",
+     xlim = c(0, D_max), ylim = c(0, max(f_prof) * 1.1))
+
+x_seq <- seq(0, D_max, length.out = 500)
+y_seq <- dgamma(x_seq, shape = shape, rate = rate) / sum(f_raw)
+lines(x_seq, y_seq, col = "#E63946", lwd = 2)
+
+# Save for presentation
+png("results/infectiousness_profile.png",
+    width = 1800, height = 1000, res = 200)
+plot((1:D_max) - 0.5, f_prof, type = "h",
+     xlab = "Days since infection", ylab = "Relative infectiousness",
+     main = "Omicron infectiousness profile (Gamma, mean = 3.3 d, SD = 1.5 d)",
+     lwd = 3, col = "steelblue",
+     xlim = c(0, D_max), ylim = c(0, max(f_prof) * 1.1),
+     cex.lab = 1.2, cex.main = 1.1, cex.axis = 1.0)
+lines(x_seq, y_seq, col = "#E63946", lwd = 2.5)
+legend("topright",
+       legend = c("Daily probability mass  f(t)", "Continuous Gamma density"),
+       col    = c("steelblue", "#E63946"),
+       lwd    = c(3, 2.5), bty = "n", cex = 0.95)
+dev.off()
+```
+
+------------------------------------------------------------------------
+
+# 4. Likelihood — timed chain-binomial
+
+Each susceptible contact faces a **daily hazard** from four sources:
+
+1.  The index case — weighted by $f({\tau + t})$ where $\tau$ is the pre-enrollment infectious days
+2.  Observed contacts who tested positive on day $t_j$ — weighted by $f({t - t_j + 1})$
+3.  Infected missing members with latent infection day $T_{hk}$ — same Gamma weight
+4.  Community background ($p_\text{bg}$ per day)
+
+The infectiousness profile $f(\cdot)$ is a discretized Gamma($\mu=3.3\,\text{d},\,\sigma=1.5\,\text{d}$) distribution (Omicron generation time; He et al. 2022), normalized to sum to 1 over 14 days. The daily force of infection on susceptible $i$ at day $t$ is:
+
+$$\lambda_i(t) = \underbrace{-\log(1-p_\text{bg})}_{\lambda_c} + q\,C_{a_i,a_\text{idx}}\,f(\tau + t) + \sum_{j:\,\text{infector}} q\,C_{a_i,a_j}\,f(t - t_j + 1)$$
+
+The cumulative escape probability is:
+
+$$E_i(t) = \exp\!\left(-\sum_{s=1}^{t} \lambda_i(s)\right)$$
+
+The likelihood contribution of contact $i$ is:
+
+- $\mathcal{L}_i = E_i(t_i - 1) - E_i(t_i) = \bigl[1 - e^{-\lambda_i(t_i)}\bigr]\cdot E_i(t_i-1)$ if infected on day $t_i$
+- $\mathcal{L}_i = E_i(T_\text{follow})$ if not infected
+
+This is the discrete-time analog of Cauchemez et al. (2004, 2009), extended here with (i) the age-stratified contact matrix $C_{a_i,a_j}$ from Prem et al. (2021), (ii) the Omicron Gamma infectiousness profile $f(\cdot)$ replacing the flat rectangular window, and (iii) latent variable augmentation for missing household members (Walker, Ross & Black 2017, *Epidemics*).
+
+------------------------------------------------------------------------
+
+# 5. Prior for missing members ($Y_{hk}$, $T_{hk}$)
+
+The prior uses only the index case and community hazard as sources — no secondary household infectors — to avoid circular dependence in the Gibbs update.
+
+($$P(Y_{hk} = 0) = E_k^{\text{prior}}(T_\text{follow}), \qquad
+  P(Y_{hk} = 1,\, T_{hk} = t) \propto E_k^{\text{prior}}(t-1) - E_k^{\text{prior}}(t)$$)
+
+------------------------------------------------------------------------
+
+# 6. MCMC sampler
+
+Four update components per iteration (data augmentation framework: Cauchemez et al. 2004; Walker, Ross & Black 2017, *Epidemics*):
+
+1.  **MH for** $q$ — random-walk on $\log(q)$; Beta(1, 19) prior (mean 0.05)
+2.  **Gibbs for** $Y_{hk}$ — exact two-way; initialises $T_{hk}$ from prior when $Y$ flips $0 \to 1$
+3.  **Gibbs for** $T_{hk}$ — exact enumeration over $t = 1 \ldots T_\text{follow}$ (only for $Y_{hk} = 1$ members)
+4.  **Gibbs for** $a_k$ — exact three-way (Child / Adult / Elderly)
+
+------------------------------------------------------------------------
+
+# 7. Run MCMC (single chain with joint q + β_Ct + Y + T + age updates)
+
+```{r}
+n_obs_contacts  <- sum(sapply(hh_list, function(h) nrow(h$contacts)))
+n_obs_infected  <- sum(sapply(hh_list, function(h) sum(h$contacts$infected_bin)))
+n_total_missing <- sum(sapply(hh_list, function(h) h$n_missing))
+
+cat("Observed contacts:", n_obs_contacts, "\n")
+cat("Observed infected:", n_obs_infected,
+    sprintf("(SAR = %.1f%%)\n", 100 * n_obs_infected / n_obs_contacts))
+
+mics_priors <- compute_mics_priors(hh_list, comp_table, dataset)
+
+cache_file <- "results/mcmc_primary.rds"
+
+if (file.exists(cache_file)) {
+  res <- readRDS(cache_file)
+  cat("Loaded cached primary MCMC results.\n")
+}
+
+res <- run_mcmc(hh_list, mics_priors, C_mat,
+                n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = N_THIN,
+                f_prof = f_prof)
+saveRDS(res, cache_file)
+
+
+all_q     <- res$q_chain
+all_E_inf <- res$E_miss_infected
+```
+
+------------------------------------------------------------------------
+
+# 8. Results
+
+## Posterior of $q$ (per-contact-per-day transmission probability)
+
+```{r}
+q_summary <- data.frame(
+  median = median(all_q),
+  lower  = quantile(all_q, 0.025),
+  upper  = quantile(all_q, 0.975)
+)
+
+cat(sprintf("q: median = %.4f  (95%% CrI: %.4f – %.4f)\n",
+            q_summary$median, q_summary$lower, q_summary$upper))
+
+ggplot(data.frame(q = all_q), aes(x = q)) +
+  geom_histogram(bins = 60, fill = "#457B9D", alpha = 0.85) +
+  geom_vline(xintercept = q_summary$median, colour = "#E63946", linewidth = 0.8) +
+  labs(title = "Posterior distribution of q",
+       x = "q (per-contact-per-day transmission probability)", y = "Count") +
+  theme_minimal(base_size = 13)
+```
+
+## Corrected SAR
+
+Sharker & Kenah (2021, *PLOS Comput Biol*) show that the naive proportion of infected contacts (used in the published GEE analysis) conflates the pairwise transmission probability with the final household attack rate, producing upward bias whenever multiple transmission generations occur within a household. The chain-binomial model corrects for this: the "Observed (enrolled only)" row below should therefore be treated as an upper bound on the true pairwise SAR, not a comparator of the same estimand.
+
+```{r}
+sar_corrected <- (n_obs_infected + all_E_inf) /
+                 (n_obs_contacts  + n_total_missing)
+sar_obs <- n_obs_infected / n_obs_contacts
+
+sar_summary <- data.frame(
+  Analysis = c("Published GEE (Khamduang et al. 2026)", "Observed enrolled only", "Corrected (chain-binomial)"),
+  SAR_pct  = c(23.5,
+               round(sar_obs * 100, 1),
+               round(median(sar_corrected) * 100, 1)),
+  Lower    = c(NA_real_,
+               round((sar_obs - 1.96 * sqrt(sar_obs * (1 - sar_obs) / n_obs_contacts)) * 100, 1),
+               round(quantile(sar_corrected, 0.025) * 100, 1)),
+  Upper    = c(NA_real_,
+               round((sar_obs + 1.96 * sqrt(sar_obs * (1 - sar_obs) / n_obs_contacts)) * 100, 1),
+               round(quantile(sar_corrected, 0.975) * 100, 1))
+)
+
+knitr::kable(sar_summary,
+             col.names = c("Analysis", "SAR (%)", "95% lower", "95% upper"),
+             caption   = paste("Individual-level SAR: published GEE vs. naive enrolled-only",
+                               "vs. chain-binomial corrected for missing members.",
+                               "GEE estimate expected to be an upper bound per Sharker & Kenah (2021)."))
+```
+
+```{r}
+ggplot(data.frame(sar = sar_corrected * 100), aes(x = sar)) +
+  geom_histogram(bins = 50, fill = "#457B9D", alpha = 0.85) +
+  geom_vline(xintercept = sar_obs * 100,
+             colour = "#E63946", linetype = "dashed", linewidth = 0.8) +
+  geom_vline(xintercept = median(sar_corrected) * 100,
+             colour = "#2a9d8f", linewidth = 0.8) +
+  annotate("text", x = sar_obs * 100, y = Inf, vjust = 2, hjust = -0.1,
+           label = sprintf("Observed %.1f%%", sar_obs * 100),
+           colour = "#E63946", size = 3.5) +
+  annotate("text", x = median(sar_corrected) * 100, y = Inf, vjust = 2, hjust = 1.1,
+           label = sprintf("Corrected %.1f%%", median(sar_corrected) * 100),
+           colour = "#2a9d8f", size = 3.5) +
+  labs(title    = "Posterior distribution of corrected SAR",
+       subtitle = "Uncertainty from joint posterior of (q, Y_hk, T_hk, age_k)",
+       x = "Individual-level SAR (%)", y = "Count") +
+  theme_minimal(base_size = 13)
+```
+
+## Expected infections among missing members
+
+```{r}
+cat(sprintf(
+  "Expected infections among %d missing members: %.1f  (95%% CrI: %.1f – %.1f)\n",
+  n_total_missing,
+  median(all_E_inf),
+  quantile(all_E_inf, 0.025),
+  quantile(all_E_inf, 0.975)
+))
+```
+
+------------------------------------------------------------------------
+
+# Convergence diagnostics
+
+```{r}
+plot(all_q, type = "l", col = "#457B9D",
+     xlab = "Iteration (post-burnin)", ylab = "q",
+     main = "Trace plot — q")
+
+n_eff <- function(x) {
+  n  <- length(x)
+  ac <- acf(x, lag.max = 100, plot = FALSE)$acf[-1]
+  n / (1 + 2 * sum(ac[ac > 0.05]))
+}
+cat(sprintf("ESS — q: %.0f\n", n_eff(all_q)))
+```
+
+------------------------------------------------------------------------
+
+# Model assumptions and limitations
+
+| Assumption | Impact if violated |
+|------------------------------------|------------------------------------|
+| $\tau = 2$ days (index pre-enrollment infectious period) | Shifts timing window for index→contact transmission; sensitivity at $\tau \in \{0,1,3\}$ recommended |
+| Single $q$ — no viral load (Ct) modifier | Planned extension; may absorb infectiousness heterogeneity into $q$ |
+| Single $q$ — no IgG susceptibility modifier | Refusal was driven by fear of venipuncture, not immune status; no reason to believe IgG prevalence differs between enrolled and missing members, so no correction is warranted |
+| Enrolled index case is sole primary infector | Co-primary community infections (n=12 phylogenetically confirmed) inflate $q$ if misattributed; partially addressed by $p_\text{bg}$ |
+| Fixed $p_\text{bg} = 0.003$/day | Community hazard varied across 2022–2024 sub-waves; sensitivity analysis warranted |
+| MCAR missingness | If refusal is related to infection status, corrected SAR is biased; crude sub-analysis in published paper supports MCAR |

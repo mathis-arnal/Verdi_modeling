@@ -1,0 +1,17 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# bib PDFs are copyrighted/paywalled — keep only the annotated summary (bib.md)
+bib/*.pdf
+
+# Quarto render output — keep .qmd source only
+scripts/*.html
+scripts/*.pdf
+scripts/*_files/
+
+# raw/sensitive data — not part of this push
+data/
+Thailand MICS6 2022 SPSS Datasets/
+wget-log

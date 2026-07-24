@@ -1,0 +1,16 @@
+---
+title: "contact_data"
+format: html
+editor: visual
+---
+
+## Contact data
+
+> **Note:** `TH_contact_data.txt` has an undocumented source and only covers ages 14–52 (257 participants, 8 children, no elderly). It is **not used** in the transmission model. The model uses the **Prem et al. 2021** synthetic home contact matrix for Thailand instead — see `chain_binomial_mcmc.qmd` section 1 for the loading and aggregation code.
+>
+> This script is kept for exploration only. Document the source of `TH_contact_data.txt` before using it for any analysis.
+
+```{r}
+getwd()
+TH_contact <- read.table("TH_contact_data.txt", sep = '\t', header = TRUE)
+```

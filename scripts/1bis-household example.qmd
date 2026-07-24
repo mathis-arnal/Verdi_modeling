@@ -1,0 +1,78 @@
+# Example for one household
+
+## Setup
+
+```
+Index:     infectious since τ=2 days before enrollment.
+Contact A: infected, timetoinf = 5.
+Contact B: not infected.
+Missing 1 (M1): unknown.
+Missing 2 (M2): unknown.
+```
+
+## Initial state (iteration 0)
+
+The sampler draws random starting values:
+
+- $\lambda_h$    = 0.02   ($\lambda_h$ init)
+- M1:  Y = 1,  T = 7    (Y ~ Bernoulli(0.2), T ~ observed timetoinf distribution)
+- M2:  Y = 0,  T = NA (Y ~ Bernoulli(0.2), T ~ observed timetoinf distribution)
+
+## Iteration 1, Step 1 - MH update for $\lambda_h$
+
+The sampler proposes a new value: $\lambda_h^*$ = 0.023
+
+It computes the likelihood twice , once with $\lambda_h$=0.02, once with $\lambda_h^*$=0.023, using the current latent state (M1 infected day 7, M2 not infected). The day loop runs inside each call:
+- day 1: index infectious (f(τ+1) = f(3)), M1 infectious (f(1-7+1)<0 → 0)
+- day 2: index (f(4)), M1 not yet infectious
+- ...
+- day 5: contact A gets infected : contributes E(4)-E(5) to likelihood
+- ...
+- day 7: M1 starts being infectious
+- ...
+- day 14: contact B survived all hazards → contributes E(14)
+
+The day loop described (day 1… day 5 contact A… day 14 contact B) is the inner loop inside "compute_escape_seq_simple". The likelihood is computed twice via "total_loglik_timed_simple" function : once for current $\lambda_h$, once for $\lambda_h$*.
+
+## Iteration 1, Step 2 - Joint Gibbs for (Y_hk, T_hk)
+'''
+
+For M1 (currently Y=1, T=7):
+
+Build enrolled infectors: contact A infected on day 5.
+
+Compute the prior (using the function "prior_miss_simple", that uses "compute_escape_seq_simple") : index + community + contact A as infector of M1.
+
+Evaluate "hh_loglik_timed_simple" for all 15 candidate states in one pass: Y=0 ("M1 never infected"), and Y=1 with T=1, 2, ..., 14. Each state's score is household log-likelihood + log(prior weight for that state) ; pm$Y0 for the Y=0 state, pm$T_probs[t] for each Y=1,T=t state:
+ll(Y_M1=0): M1 absent from infector list → contact B faces less hazard → slightly higher chance B escaped
+ll(Y_M1=1, T=t): M1 infectious from day t → adds hazard to B on days t–14
+
+Normalise all 15 scores with log-sum-exp into a single categorical distribution and sample one state directly.
+Sample: state Y=1, T=6 is drawn (M1 moves from T=7 to T=6, staying infected).
+
+For M2 (currently Y=0, T=NA):
+
+Same enrolled infectors and prior. Evaluate the same 15-way joint state (Y=0; Y=1, T=1..14): any Y=1,T=t state would add hazard to B on days t–14, but B was not infected, so those states score lower than Y=0.
+Sample: M2 stays Y=0, T=NA.
+
+'''
+
+## Iteration 1, Priors updated
+
+$\lambda_h$    = 0.023
+M1:  Y = 1,  T = 6
+M2:  Y = 0,  T = NA
+
+The MH step for $\lambda_h$ requires all households before deciding to accept or reject $\lambda_h$*. This is a common prior. So for each iteration we go through all households, compute the likelihood contributions, and then accept/reject $\lambda_h$*.
+
+The Gibbs step is independent across households( Each household's latent variables are updated based on the current $\lambda_h$ and the observed data for that household), so it could be updated in parallel.
+
+## After 20,000 iterations
+
+The chain has visited thousands of combinations.
+We burn 5,000 (25%) to not be biased toward the starting value.
+The posterior gives you:
+
+Distribution of $\lambda_h$ → median + 95% CrI for $\lambda_h$
+Distribution of Σ Y_hk → on average, say 0.4 of the 2 missing members were infected per draw
+Corrected SAR = (1 + 0.4) / (2 + 2) = 35% with a credible interval
