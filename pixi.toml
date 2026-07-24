@@ -1,0 +1,62 @@
+[workspace]
+name = "VERDI_modeling"
+description = "Household SARS-CoV-2 transmission modeling — missing member correction (VERDI-RECOVER Thailand)"
+version = "0.1.0"
+channels = ["conda-forge"]
+platforms = ["linux-64", "win-64"]
+
+# ── R runtime ──────────────────────────────────────────────────────────────────
+[dependencies]
+r-base = ">=4.3,<5"
+
+# Data manipulation
+r-dplyr   = "*"
+r-tidyr   = "*"
+r-stringr = "*"
+r-purrr   = "*"
+
+# Missing data
+r-naniar = "*"
+
+# Statistical modeling
+r-randomforest = "*"
+r-mice         = "*"
+r-broom        = "*"
+
+# Visualisation
+r-ggplot2 = "*"
+r-scales  = "*"
+
+# Data I/O
+r-haven = "*"    # read SPSS (.sav) files — Thailand MICS6 dataset
+r-readr = "*"
+
+# Reporting
+r-knitr     = "*"
+r-rmarkdown = "*"
+
+# Quarto CLI
+quarto = ">=1.4"
+
+# ── VS Code R support ──────────────────────────────────────────────────────────
+# languageserver: IntelliSense, go-to-definition, hover docs
+# httpgd:         render plots inside VS Code instead of a separate window
+r-languageserver = "*"
+r-httpgd         = "*"
+r-lintr          = "*"    # inline linting in the editor
+
+# ── Optional heavy dependency (comment out if install is slow) ─────────────────
+# r-caret is only used for cross-validated logistic regression in data_exploration.qmd
+# r-caret = "*"
+
+# ── Tasks ──────────────────────────────────────────────────────────────────────
+[tasks]
+
+# Run VS Code
+vscode = "code ."
+
+render-exploration = "quarto render scripts/data_exploration.qmd"
+render-mics        = "quarto render scripts/mics_data.qmd"
+render-mcmc        = "quarto render scripts/chain_binomial_mcmc.qmd"
+render-all         = "quarto render scripts/"
+render-presentation = "quarto render scripts/model_presentation.qmd"
